@@ -1,0 +1,7 @@
+.claude
+.vscode
+frontend/node_modules
+frontend/dist
+__pycache__
+backend/*/__pycache__
+backend/data
