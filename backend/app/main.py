@@ -2,9 +2,12 @@
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from app.config import settings
 from app.core.database import init_db
@@ -29,10 +32,15 @@ app = FastAPI(
     redoc_url="/api/redoc" if settings.debug else None,
 )
 
-# CORS - allow the frontend dev server
+# CORS - allow frontend dev server and Electron app
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],
@@ -54,3 +62,23 @@ app.include_router(settings_router)
 async def health_check():
     """Health check endpoint."""
     return {"status": "ok", "app": settings.app_name}
+
+
+# ── Serve frontend static files in production (Electron) mode ────────────────
+
+_static_dir = Path(settings.static_dir) if settings.static_dir else None
+
+if _static_dir and _static_dir.is_dir():
+    # Serve assets (JS, CSS, images) under /assets
+    assets_dir = _static_dir / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+    # SPA fallback: any non-API route serves index.html
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        """Serve the frontend SPA for any non-API route."""
+        file_path = _static_dir / full_path
+        if file_path.is_file():
+            return FileResponse(str(file_path))
+        return FileResponse(str(_static_dir / "index.html"))

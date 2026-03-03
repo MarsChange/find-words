@@ -1,7 +1,13 @@
 .claude
 .vscode
-frontend/node_modules
-frontend/dist
 __pycache__
 backend/*/__pycache__
 backend/data
+backend/dist
+backend/build
+backend/venv
+backend/*.spec.bak
+frontend/node_modules
+frontend/dist
+node_modules
+release

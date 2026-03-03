@@ -1,7 +1,11 @@
 import axios from 'axios';
 
+// In Electron production mode, backend runs at http://localhost:8000
+// In dev mode, Vite proxies /api to localhost:8000
+const BASE_URL = window.location.port === '5173' ? '/api' : 'http://localhost:8000/api';
+
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: BASE_URL,
   timeout: 30000,
   headers: {
     'Content-Type': 'application/json',
@@ -72,7 +76,7 @@ export function deleteFile(fileId: number | string): Promise<void> {
 }
 
 export function getFileUrl(fileId: number | string): string {
-  return `/api/files/${fileId}/content`;
+  return `${BASE_URL}/files/${fileId}/content`;
 }
 
 /* ── Sessions ── */

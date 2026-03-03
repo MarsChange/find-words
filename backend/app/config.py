@@ -4,10 +4,22 @@ import os
 import json
 from pathlib import Path
 from pydantic_settings import BaseSettings
-from pydantic import Field
 
 
-_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
+def _default_data_dir() -> Path:
+    """Return the default data directory.
+
+    When FINDWORDS_DATA_DIR env var is set (e.g. by Electron), use that.
+    Otherwise fall back to ``backend/data`` relative to this file.
+    """
+    env = os.environ.get("FINDWORDS_DATA_DIR")
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parent.parent / "data"
+
+
+_DATA_DIR = _default_data_dir()
+_CONFIG_PATH = Path(os.environ.get("FINDWORDS_CONFIG_PATH", "")) if os.environ.get("FINDWORDS_CONFIG_PATH") else _DATA_DIR / "config.json"
 
 
 class Settings(BaseSettings):
@@ -17,14 +29,13 @@ class Settings(BaseSettings):
     debug: bool = False
 
     # Database
-    db_path: str = str(
-        Path(__file__).resolve().parent.parent / "data" / "findwords.db"
-    )
+    db_path: str = str(_DATA_DIR / "findwords.db")
 
     # Upload directory
-    upload_dir: str = str(
-        Path(__file__).resolve().parent.parent / "data" / "uploads"
-    )
+    upload_dir: str = str(_DATA_DIR / "uploads")
+
+    # Static frontend directory (set by Electron or leave empty for dev mode)
+    static_dir: str = ""
 
     # LLM provider
     llm_provider: str = "DeepSeek"

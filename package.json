@@ -1,0 +1,24 @@
+{
+  "name": "findwords",
+  "version": "1.0.0",
+  "description": "古籍词语检索分析系统 - 跨平台桌面应用",
+  "main": "electron/main.js",
+  "author": "Chen Shengfeng",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron .",
+    "build:frontend": "cd frontend && npm run build",
+    "build:backend": "cd backend && pyinstaller --name findwords-server --onefile --console app/main.py --add-data \"app:app\" --hidden-import uvicorn.logging --hidden-import uvicorn.loops.auto --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.protocols.websockets.auto --hidden-import uvicorn.lifespan.on",
+    "build:all": "npm run build:frontend && npm run build:backend && npm run dist",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "dependencies": {
+    "electron": "^33.0.0"
+  },
+  "devDependencies": {
+    "electron-builder": "^25.1.0"
+  }
+}

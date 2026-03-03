@@ -1,0 +1,49 @@
+appId: com.findwords.app
+productName: FindWords
+copyright: Copyright © 2026 Chen Shengfeng
+
+directories:
+  output: release
+
+files:
+  - electron/**/*
+  - package.json
+
+extraResources:
+  # Bundled Python backend executable
+  - from: backend/dist/
+    to: backend
+    filter:
+      - "**/*"
+  # Built frontend static files
+  - from: frontend/dist/
+    to: frontend-dist
+    filter:
+      - "**/*"
+
+mac:
+  category: public.app-category.reference
+  icon: electron/icons/icon.icns
+  target:
+    - dmg
+    - zip
+
+win:
+  icon: electron/icons/icon.ico
+  target:
+    - nsis
+    - portable
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  installerLanguages:
+    - zh_CN
+    - en_US
+
+linux:
+  icon: electron/icons/
+  category: Education
+  target:
+    - AppImage
+    - deb
