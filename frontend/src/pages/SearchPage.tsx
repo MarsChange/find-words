@@ -7,6 +7,9 @@ import ChatSidebar from '@/components/ChatSidebar';
 import { createSession, getSession, getSessionResults, type SearchResultItem } from '@/services/api';
 import { wsService } from '@/services/websocket';
 
+const DYNASTY_OPTIONS = ['先秦', '西汉', '东汉', '魏晋南北朝', '隋唐', '宋元明清'] as const;
+const CATEGORY_OPTIONS = ['本土文献', '汉译佛典', '中土佛教文献'] as const;
+
 export default function SearchPage() {
   const navigate = useNavigate();
   const [keyword, setKeyword] = useState('');
@@ -19,6 +22,8 @@ export default function SearchPage() {
   const [traditionalKeyword, setTraditionalKeyword] = useState('');
   const [synthesis, setSynthesis] = useState('');
   const [isSynthesizing, setIsSynthesizing] = useState(false);
+  const [selectedDynasties, setSelectedDynasties] = useState<string[]>([]);
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
 
   // Connect WebSocket on mount
   useEffect(() => {
@@ -89,6 +94,30 @@ export default function SearchPage() {
     navigate(`/reader/${fileId}?page=${page}&keyword=${encodeURIComponent(keyword)}`);
   };
 
+  const toggleDynasty = (dynasty: string) => {
+    setSelectedDynasties((prev) =>
+      prev.includes(dynasty)
+        ? prev.filter((d) => d !== dynasty)
+        : [...prev, dynasty]
+    );
+  };
+
+  const toggleCategory = (category: string) => {
+    setSelectedCategories((prev) =>
+      prev.includes(category)
+        ? prev.filter((c) => c !== category)
+        : [...prev, category]
+    );
+  };
+
+  // Filter local results by selected dynasties and categories; CBETA results pass through unfiltered
+  const filteredResults = results.filter((r) => {
+    if (r.source !== 'local') return true;
+    if (selectedDynasties.length > 0 && !selectedDynasties.includes(r.dynasty)) return false;
+    if (selectedCategories.length > 0 && !selectedCategories.includes(r.category)) return false;
+    return true;
+  });
+
   const handleSessionChange = async (newSessionId: number | undefined) => {
     setSessionId(newSessionId);
     if (!newSessionId) {
@@ -139,7 +168,7 @@ export default function SearchPage() {
               {isSearching ? '检索中...' : '检索'}
             </button>
           </div>
-          <div className="mx-auto mt-2 flex max-w-2xl items-center">
+          <div className="mx-auto mt-2 flex max-w-2xl items-center gap-4 flex-wrap">
             <label className="flex cursor-pointer items-center gap-2 text-sm text-ink-700">
               <input
                 type="checkbox"
@@ -149,6 +178,54 @@ export default function SearchPage() {
               />
               同时检索 CBETA 线上佛典
             </label>
+            <div className="flex items-center gap-1.5 text-sm text-ink-700">
+              <span className="text-parchment-400">朝代筛选:</span>
+              {DYNASTY_OPTIONS.map((d) => (
+                <button
+                  key={d}
+                  onClick={() => toggleDynasty(d)}
+                  className={`rounded-full border px-2 py-0.5 text-xs transition-colors ${
+                    selectedDynasties.includes(d)
+                      ? 'border-cinnabar-400 bg-cinnabar-500/10 text-cinnabar-600'
+                      : 'border-parchment-200 text-parchment-400 hover:border-parchment-300 hover:text-ink-700'
+                  }`}
+                >
+                  {d}
+                </button>
+              ))}
+              {selectedDynasties.length > 0 && (
+                <button
+                  onClick={() => setSelectedDynasties([])}
+                  className="ml-1 text-xs text-parchment-400 hover:text-cinnabar-500"
+                >
+                  清除
+                </button>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5 text-sm text-ink-700">
+              <span className="text-parchment-400">分类筛选:</span>
+              {CATEGORY_OPTIONS.map((c) => (
+                <button
+                  key={c}
+                  onClick={() => toggleCategory(c)}
+                  className={`rounded-full border px-2 py-0.5 text-xs transition-colors ${
+                    selectedCategories.includes(c)
+                      ? 'border-cinnabar-400 bg-cinnabar-500/10 text-cinnabar-600'
+                      : 'border-parchment-200 text-parchment-400 hover:border-parchment-300 hover:text-ink-700'
+                  }`}
+                >
+                  {c}
+                </button>
+              ))}
+              {selectedCategories.length > 0 && (
+                <button
+                  onClick={() => setSelectedCategories([])}
+                  className="ml-1 text-xs text-parchment-400 hover:text-cinnabar-500"
+                >
+                  清除
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
@@ -164,14 +241,14 @@ export default function SearchPage() {
             </div>
           )}
 
-          {hasSearched && !isSearching && results.length === 0 && (
+          {hasSearched && !isSearching && filteredResults.length === 0 && (
             <div className="flex h-full flex-col items-center justify-center text-parchment-400">
               <p className="font-serif text-lg">未找到相关结果</p>
-              <p className="mt-1 text-sm">请尝试其他关键词</p>
+              <p className="mt-1 text-sm">{(selectedDynasties.length > 0 || selectedCategories.length > 0) ? '尝试调整筛选条件' : '请尝试其他关键词'}</p>
             </div>
           )}
 
-          {hasSearched && results.length > 0 && (
+          {hasSearched && filteredResults.length > 0 && (
             <>
               {/* AI Analysis Section */}
               {(synthesis || isSynthesizing) && (
@@ -200,10 +277,13 @@ export default function SearchPage() {
               )}
               
               <p className="mb-4 text-sm text-parchment-400">
-                共找到 <span className="font-medium text-ink-700">{total}</span> 条结果
+                共找到 <span className="font-medium text-ink-700">{filteredResults.length}</span> 条结果
+                {(selectedDynasties.length > 0 || selectedCategories.length > 0) && total !== filteredResults.length && (
+                  <span className="ml-1">（共 {total} 条，已筛选）</span>
+                )}
               </p>
               <div className="space-y-3">
-                {results.map((r, i) => (
+                {filteredResults.map((r, i) => (
                   <SearchResultCard
                     key={i}
                     result={r}

@@ -78,6 +78,7 @@ def init_db() -> None:
                 filename   TEXT    NOT NULL,
                 filepath   TEXT    NOT NULL,
                 dynasty    TEXT    DEFAULT '',
+                category   TEXT    DEFAULT '',
                 author     TEXT    DEFAULT '',
                 page_count INTEGER DEFAULT 0,
                 status     TEXT    DEFAULT 'pending'
@@ -116,6 +117,7 @@ def init_db() -> None:
                 page_num   INTEGER,
                 snippet    TEXT    DEFAULT '',
                 dynasty    TEXT    DEFAULT '',
+                category   TEXT    DEFAULT '',
                 author     TEXT    DEFAULT '',
                 sutra_id   TEXT,
                 title      TEXT,
@@ -142,6 +144,20 @@ def init_db() -> None:
         try:
             conn.execute(
                 "ALTER TABLE sessions ADD COLUMN synthesis TEXT NOT NULL DEFAULT ''"
+            )
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        # Migrate existing databases: add category column to files if missing
+        try:
+            conn.execute(
+                "ALTER TABLE files ADD COLUMN category TEXT DEFAULT ''"
+            )
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        # Migrate existing databases: add category column to search_results if missing
+        try:
+            conn.execute(
+                "ALTER TABLE search_results ADD COLUMN category TEXT DEFAULT ''"
             )
         except sqlite3.OperationalError:
             pass  # Column already exists
@@ -178,17 +194,28 @@ def update_file_status(file_id: int, status: str,
 
 
 def update_file_metadata(file_id: int, dynasty: str | None = None,
+                         category: str | None = None,
                          author: str | None = None) -> None:
     """Update optional metadata fields on a file record."""
+    updates: list[str] = []
+    params: list = []
+    if dynasty is not None:
+        updates.append("dynasty=?")
+        params.append(dynasty)
+    if category is not None:
+        updates.append("category=?")
+        params.append(category)
+    if author is not None:
+        updates.append("author=?")
+        params.append(author)
+    if not updates:
+        return
+    params.append(file_id)
     with get_db() as conn:
-        if dynasty is not None:
-            conn.execute(
-                "UPDATE files SET dynasty=? WHERE id=?", (dynasty, file_id)
-            )
-        if author is not None:
-            conn.execute(
-                "UPDATE files SET author=? WHERE id=?", (author, file_id)
-            )
+        conn.execute(
+            f"UPDATE files SET {', '.join(updates)} WHERE id=?",
+            params,
+        )
 
 
 def get_file(file_id: int) -> dict | None:
@@ -292,6 +319,7 @@ def search_content(query: str, limit: int = 100) -> list[dict]:
                 snippet(content_fts, 2, '【', '】', '…', 30) AS snippet,
                 f.filename,
                 f.dynasty,
+                f.category,
                 f.author
             FROM content_fts c
             JOIN files f ON f.id = CAST(c.file_id AS INTEGER)
@@ -426,8 +454,8 @@ def insert_search_results(session_id: int, hits: list[dict]) -> None:
         conn.executemany(
             """INSERT INTO search_results
                (session_id, source, file_id, filename, page_num,
-                snippet, dynasty, author, sutra_id, title)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                snippet, dynasty, category, author, sutra_id, title)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     session_id,
@@ -439,6 +467,7 @@ def insert_search_results(session_id: int, hits: list[dict]) -> None:
                     if h.get("snippets")
                     else h.get("snippet", ""),
                     h.get("dynasty", ""),
+                    h.get("category", ""),
                     h.get("author", ""),
                     h.get("sutra_id"),
                     h.get("title"),

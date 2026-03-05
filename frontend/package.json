@@ -1,13 +1,25 @@
 {
-  "name": "findwords-frontend",
+  "name": "findwords",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
+  "description": "古籍词语检索分析系统 - 跨平台桌面应用",
+  "main": "electron/main.cjs",
+  "author": "Chen Shengfeng",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:electron": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "electron": "electron .",
     "build": "tsc -b && vite build",
+    "build:backend": "cd ../backend && pyinstaller --name findwords-server --onefile --console app/main.py --add-data \"app:app\" --hidden-import uvicorn.logging --hidden-import uvicorn.loops.auto --hidden-import uvicorn.protocols.http.auto --hidden-import uvicorn.protocols.websockets.auto --hidden-import uvicorn.lifespan.on",
+    "build:all": "npm run build && npm run build:backend && npm run dist",
     "preview": "vite preview",
-    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
   },
   "dependencies": {
     "@react-pdf-viewer/core": "^3.12.0",
@@ -29,12 +41,16 @@
     "@typescript-eslint/parser": "^7.18.0",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
+    "concurrently": "^9.2.1",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.0",
     "eslint": "^8.57.0",
     "eslint-plugin-react-hooks": "^4.6.2",
     "eslint-plugin-react-refresh": "^0.4.14",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.14",
     "typescript": "^5.6.3",
-    "vite": "^5.4.11"
+    "vite": "^5.4.11",
+    "wait-on": "^9.0.4"
   }
 }

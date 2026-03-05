@@ -1,8 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import FileUploader from '@/components/FileUploader';
 import ProgressBar from '@/components/ProgressBar';
-import { listFiles, uploadFiles, deleteFile, reindexFile, type FileInfo } from '@/services/api';
+import { listFiles, uploadFiles, deleteFile, reindexFile, updateFileMetadata, type FileInfo } from '@/services/api';
 import { wsService } from '@/services/websocket';
+
+const DYNASTY_OPTIONS = ['先秦', '西汉', '东汉', '魏晋南北朝', '隋唐', '宋元明清'] as const;
+const CATEGORY_OPTIONS = ['本土文献', '汉译佛典', '中土佛教文献'] as const;
 
 interface FileProgress {
   current: number;
@@ -89,6 +92,28 @@ export default function FilesPage() {
     }
   };
 
+  const handleDynastyChange = async (fileId: number, dynasty: string) => {
+    try {
+      const updated = await updateFileMetadata(fileId, { dynasty });
+      setFiles((prev) =>
+        prev.map((f) => (f.id === fileId ? { ...f, dynasty: updated.dynasty } : f))
+      );
+    } catch {
+      alert('更新朝代失败。');
+    }
+  };
+
+  const handleCategoryChange = async (fileId: number, category: string) => {
+    try {
+      const updated = await updateFileMetadata(fileId, { category });
+      setFiles((prev) =>
+        prev.map((f) => (f.id === fileId ? { ...f, category: updated.category } : f))
+      );
+    } catch {
+      alert('更新文献分类失败。');
+    }
+  };
+
   const getProgressPercent = (fileId: number): number => {
     const p = progress[fileId];
     if (!p || p.total === 0) return 0;
@@ -123,22 +148,43 @@ export default function FilesPage() {
               key={file.id}
               className="rounded-lg border border-parchment-200 bg-white p-4 shadow-sm"
             >
-              <div className="mb-2 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <svg className="h-5 w-5 text-cinnabar-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <div className="mb-2 flex items-center justify-between gap-4">
+                <div className="flex min-w-0 items-center gap-3">
+                  <svg className="h-5 w-5 shrink-0 text-cinnabar-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
                       d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                   </svg>
-                  <div>
-                    <p className="text-sm font-medium text-ink-800">{file.filename}</p>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-ink-800">{file.filename}</p>
                     <p className="text-xs text-parchment-400">
                       {file.dynasty && `${file.dynasty}`}
+                      {file.category && ` · ${file.category}`}
                       {file.author && ` · ${file.author}`}
                       {file.page_count > 0 && ` · ${file.page_count} 页已索引`}
                     </p>
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="flex shrink-0 items-center gap-3 whitespace-nowrap">
+                  <select
+                    value={file.dynasty || ''}
+                    onChange={(e) => handleDynastyChange(file.id, e.target.value)}
+                    className="rounded border border-parchment-200 bg-parchment-50 px-1.5 py-0.5 text-xs text-ink-700 focus:border-cinnabar-400 focus:outline-none focus:ring-1 focus:ring-cinnabar-400/20"
+                  >
+                    <option value="">选择朝代</option>
+                    {DYNASTY_OPTIONS.map((d) => (
+                      <option key={d} value={d}>{d}</option>
+                    ))}
+                  </select>
+                  <select
+                    value={file.category || ''}
+                    onChange={(e) => handleCategoryChange(file.id, e.target.value)}
+                    className="rounded border border-parchment-200 bg-parchment-50 px-1.5 py-0.5 text-xs text-ink-700 focus:border-cinnabar-400 focus:outline-none focus:ring-1 focus:ring-cinnabar-400/20"
+                  >
+                    <option value="">选择分类</option>
+                    {CATEGORY_OPTIONS.map((c) => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
                   <button
                     onClick={() => handleReindex(file.id)}
                     disabled={file.status === 'processing' || file.status === 'indexing'}

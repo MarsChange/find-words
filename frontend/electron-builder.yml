@@ -8,15 +8,20 @@ directories:
 files:
   - electron/**/*
   - package.json
+  - "!src/**"
+  - "!public/**"
+  - "!*.ts"
+  - "!*.config.*"
+  - "!tsconfig.json"
 
 extraResources:
   # Bundled Python backend executable
-  - from: backend/dist/
+  - from: ../backend/dist/
     to: backend
     filter:
       - "**/*"
   # Built frontend static files
-  - from: frontend/dist/
+  - from: dist/
     to: frontend-dist
     filter:
       - "**/*"

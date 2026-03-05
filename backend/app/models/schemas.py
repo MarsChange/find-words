@@ -11,6 +11,7 @@ class FileMetadata(BaseModel):
     filename: str
     filepath: str
     dynasty: str = ""
+    category: str = ""
     author: str = ""
     page_count: int = 0
     status: str = "pending"
@@ -28,8 +29,9 @@ class FileListResponse(BaseModel):
 
 
 class FileUpdateRequest(BaseModel):
-    dynasty: Optional[str] = None
-    author: Optional[str] = None
+    dynasty: Optional[str] = Field(None, max_length=50)
+    category: Optional[str] = Field(None, max_length=50)
+    author: Optional[str] = Field(None, max_length=200)
 
 
 # ── Search models ────────────────────────────────────────────────────────────
@@ -48,6 +50,7 @@ class SearchHit(BaseModel):
     snippet: str
     snippets: list[str] = []
     dynasty: str = ""
+    category: str = ""
     author: str = ""
     sutra_id: Optional[str] = None
     title: Optional[str] = None
@@ -68,7 +71,7 @@ class ChatMessage(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1)
+    message: str = Field(..., min_length=1, max_length=10000)
     session_id: Optional[int] = None
     history: list[ChatMessage] = []
 

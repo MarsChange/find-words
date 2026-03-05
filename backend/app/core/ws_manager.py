@@ -75,8 +75,8 @@ async def _handle_search_stream(websocket: WebSocket, data: dict) -> None:
     use_cbeta = data.get("use_cbeta", False)
     session_id = data.get("session_id")
     
-    if not query:
-        await websocket.send_json({"type": "search_error", "error": "Query is required"})
+    if not query or len(query) > 200:
+        await websocket.send_json({"type": "search_error", "error": "Query is required (max 200 chars)"})
         return
     
     try:
@@ -133,8 +133,8 @@ async def _handle_chat_stream(websocket: WebSocket, data: dict) -> None:
     history = data.get("history", [])
     synthesis = data.get("synthesis", "")
     
-    if not message:
-        await websocket.send_json({"type": "chat_error", "error": "Message is required"})
+    if not message or len(message) > 10000:
+        await websocket.send_json({"type": "chat_error", "error": "Message is required (max 10000 chars)"})
         return
     
     # Validate session if provided

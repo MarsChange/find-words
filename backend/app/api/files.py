@@ -98,7 +98,11 @@ async def get_file_content(file_id: int):
     f = get_file(file_id)
     if not f:
         raise HTTPException(status_code=404, detail="文件不存在")
-    filepath = Path(f["filepath"])
+    filepath = Path(f["filepath"]).resolve()
+    upload_dir = Path(settings.upload_dir).resolve()
+    # Ensure the file is within the upload directory (defense against path traversal)
+    if not str(filepath).startswith(str(upload_dir)):
+        raise HTTPException(status_code=403, detail="文件路径不合法")
     if not filepath.exists():
         raise HTTPException(status_code=404, detail="PDF 文件不存在于磁盘")
     return FileResponse(
@@ -123,8 +127,10 @@ async def update_file(file_id: int, req: FileUpdateRequest) -> FileMetadata:
     f = get_file(file_id)
     if not f:
         raise HTTPException(status_code=404, detail="文件不存在")
-    update_file_metadata(file_id, dynasty=req.dynasty, author=req.author)
+    update_file_metadata(file_id, dynasty=req.dynasty, category=req.category, author=req.author)
     updated = get_file(file_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="文件不存在")
     return FileMetadata(**updated)
 
 

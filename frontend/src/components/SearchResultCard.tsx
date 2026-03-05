@@ -43,6 +43,11 @@ export default function SearchResultCard({ result, keyword, traditionalKeyword, 
             {result.dynasty}
           </span>
         )}
+        {result.category && (
+          <span className="rounded bg-indigo-500/10 px-1.5 py-0.5 font-serif text-xs text-indigo-600">
+            {result.category}
+          </span>
+        )}
         {result.source === 'local' && (
           <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-xs text-emerald-600">本地</span>
         )}

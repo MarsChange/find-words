@@ -28,6 +28,7 @@ export interface SearchResultItem {
   snippet: string;
   snippets?: string[];
   dynasty: string;
+  category: string;
   author: string;
 }
 
@@ -58,6 +59,7 @@ export interface FileInfo {
   id: number;
   filename: string;
   dynasty: string;
+  category: string;
   author: string;
   status: string;
   page_count: number;
@@ -87,6 +89,13 @@ export function deleteFile(fileId: number | string): Promise<void> {
 
 export function reindexFile(fileId: number | string): Promise<void> {
   return api.post(`/files/${fileId}/reindex`).then(() => undefined);
+}
+
+export function updateFileMetadata(
+  fileId: number | string,
+  data: { dynasty?: string; category?: string; author?: string },
+): Promise<FileInfo> {
+  return api.patch(`/files/${fileId}`, data).then((r) => r.data);
 }
 
 export function getFileUrl(fileId: number | string): string {
