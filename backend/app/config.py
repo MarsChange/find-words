@@ -39,9 +39,9 @@ class Settings(BaseSettings):
 
     # LLM provider
     llm_provider: str = "DeepSeek"
-    llm_provider_base_url: str = "https://api.deepseek.com/v1"
+    llm_provider_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     llm_provider_api_key: str = ""
-    llm_model_name: str = "deepseek-reasoner"
+    llm_model_name: str = "deepseek-v3.2"
 
     # Selenium
     chrome_driver_path: str = ""

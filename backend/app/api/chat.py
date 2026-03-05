@@ -11,6 +11,7 @@ from app.core.database import (
     create_session,
     delete_session,
     get_messages_by_session,
+    get_search_results_by_session,
     get_session_by_id,
     get_sessions,
 )
@@ -19,10 +20,12 @@ from app.models.schemas import (
     ChatResponse,
     MessageResponse,
     SearchHit,
+    SearchResultResponse,
     SessionCreate,
     SessionDetailResponse,
     SessionListResponse,
     SessionResponse,
+    SessionSearchResultsResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -70,6 +73,21 @@ async def remove_session(session_id: int) -> dict:
         raise HTTPException(status_code=404, detail="会话不存在")
     delete_session(session_id)
     return {"detail": "会话已删除"}
+
+
+@router.get("/sessions/{session_id}/results", response_model=SessionSearchResultsResponse)
+async def get_session_results(session_id: int) -> SessionSearchResultsResponse:
+    """Get all search results stored for a session."""
+    session = get_session_by_id(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    rows = get_search_results_by_session(session_id)
+    results = [SearchResultResponse(**r) for r in rows]
+    return SessionSearchResultsResponse(
+        session_id=session_id,
+        results=results,
+        total=len(results),
+    )
 
 
 # ── Chat endpoint ────────────────────────────────────────────────────────────

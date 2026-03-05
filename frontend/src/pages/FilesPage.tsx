@@ -1,12 +1,18 @@
 import { useState, useEffect, useCallback } from 'react';
 import FileUploader from '@/components/FileUploader';
 import ProgressBar from '@/components/ProgressBar';
-import { listFiles, uploadFiles, deleteFile, type FileInfo } from '@/services/api';
+import { listFiles, uploadFiles, deleteFile, reindexFile, type FileInfo } from '@/services/api';
 import { wsService } from '@/services/websocket';
+
+interface FileProgress {
+  current: number;
+  total: number;
+}
 
 export default function FilesPage() {
   const [files, setFiles] = useState<FileInfo[]>([]);
   const [isUploading, setIsUploading] = useState(false);
+  const [progress, setProgress] = useState<Record<number, FileProgress>>({});
 
   const loadFiles = useCallback(async () => {
     try {
@@ -24,13 +30,25 @@ export default function FilesPage() {
     wsService.connect();
     const unsub = wsService.on('index_progress', (data) => {
       const fileId = data.file_id as number;
-      const status = data.status as FileInfo['status'];
+      const status = data.status as string | undefined;
+      const current = data.current as number | undefined;
+      const total = data.total as number | undefined;
 
-      setFiles((prev) =>
-        prev.map((f) =>
-          f.id === fileId ? { ...f, status: status ?? f.status } : f
-        )
-      );
+      // Update progress
+      if (current != null && total != null && total > 0) {
+        setProgress((prev) => ({ ...prev, [fileId]: { current, total } }));
+      }
+
+      // Update file status when completed or errored
+      if (status === 'ready' || status === 'error') {
+        setProgress((prev) => {
+          const next = { ...prev };
+          delete next[fileId];
+          return next;
+        });
+        // Reload file list to get updated page_count and status
+        loadFiles();
+      }
     });
 
     return () => {
@@ -58,6 +76,29 @@ export default function FilesPage() {
     } catch {
       alert('删除失败。');
     }
+  };
+
+  const handleReindex = async (fileId: number) => {
+    try {
+      await reindexFile(fileId);
+      setFiles((prev) =>
+        prev.map((f) => (f.id === fileId ? { ...f, status: 'processing' } : f))
+      );
+    } catch {
+      alert('重新索引失败。');
+    }
+  };
+
+  const getProgressPercent = (fileId: number): number => {
+    const p = progress[fileId];
+    if (!p || p.total === 0) return 0;
+    return Math.round((p.current / p.total) * 100);
+  };
+
+  const getProgressLabel = (fileId: number): string => {
+    const p = progress[fileId];
+    if (!p) return '';
+    return `${p.current} / ${p.total} 页`;
   };
 
   return (
@@ -93,20 +134,31 @@ export default function FilesPage() {
                     <p className="text-xs text-parchment-400">
                       {file.dynasty && `${file.dynasty}`}
                       {file.author && ` · ${file.author}`}
+                      {file.page_count > 0 && ` · ${file.page_count} 页已索引`}
                     </p>
                   </div>
                 </div>
-                <button
-                  onClick={() => handleDelete(file.id)}
-                  className="text-xs text-parchment-400 transition-colors hover:text-red-500"
-                >
-                  删除
-                </button>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => handleReindex(file.id)}
+                    disabled={file.status === 'processing' || file.status === 'indexing'}
+                    className="text-xs text-parchment-400 transition-colors hover:text-cinnabar-500 disabled:opacity-40"
+                  >
+                    重新索引
+                  </button>
+                  <button
+                    onClick={() => handleDelete(file.id)}
+                    className="text-xs text-parchment-400 transition-colors hover:text-red-500"
+                  >
+                    删除
+                  </button>
+                </div>
               </div>
 
               {(file.status === 'indexing' || file.status === 'pending' || file.status === 'processing') && (
                 <ProgressBar
-                  progress={0}
+                  progress={getProgressPercent(file.id)}
+                  label={getProgressLabel(file.id) || undefined}
                   status="indexing"
                 />
               )}

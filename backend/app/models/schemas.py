@@ -37,6 +37,7 @@ class FileUpdateRequest(BaseModel):
 class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=200)
     use_cbeta: bool = False
+    session_id: Optional[int] = None
 
 
 class SearchHit(BaseModel):
@@ -45,8 +46,11 @@ class SearchHit(BaseModel):
     filename: Optional[str] = None
     page_num: Optional[int] = None
     snippet: str
+    snippets: list[str] = []
     dynasty: str = ""
     author: str = ""
+    sutra_id: Optional[str] = None
+    title: Optional[str] = None
 
 
 class SearchResponse(BaseModel):
@@ -99,6 +103,8 @@ class SessionCreate(BaseModel):
 class SessionResponse(BaseModel):
     id: int
     keyword: str
+    traditional_keyword: str = ""
+    synthesis: str = ""
     created_at: str
     updated_at: str
     message_count: int = 0
@@ -120,3 +126,39 @@ class MessageResponse(BaseModel):
 class SessionDetailResponse(BaseModel):
     session: SessionResponse
     messages: list[MessageResponse]
+
+
+# ── Search result storage models ──────────────────────────────────────────────
+
+class SearchResultResponse(BaseModel):
+    id: int
+    session_id: int
+    source: str
+    file_id: Optional[int] = None
+    filename: str = ""
+    page_num: Optional[int] = None
+    snippet: str = ""
+    snippets: list[str] = []
+    dynasty: str = ""
+    author: str = ""
+    sutra_id: Optional[str] = None
+    title: Optional[str] = None
+    created_at: str
+
+
+class SessionSearchResultsResponse(BaseModel):
+    session_id: int
+    results: list[SearchResultResponse]
+    total: int
+
+
+# ── CBETA settings models ────────────────────────────────────────────────────
+
+class AppSettingsResponse(BaseModel):
+    cbeta_max_results: int = 20
+    enable_thinking: bool = False
+
+
+class AppSettingsUpdateRequest(BaseModel):
+    cbeta_max_results: Optional[int] = Field(None, ge=5, le=100)
+    enable_thinking: Optional[bool] = None

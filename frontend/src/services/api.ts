@@ -17,6 +17,7 @@ const api = axios.create({
 export interface SearchParams {
   keyword: string;
   use_cbeta?: boolean;
+  session_id?: number;
 }
 
 export interface SearchResultItem {
@@ -25,6 +26,7 @@ export interface SearchResultItem {
   filename: string;
   page_num: number | null;
   snippet: string;
+  snippets?: string[];
   dynasty: string;
   author: string;
 }
@@ -38,8 +40,16 @@ export interface SearchResponse {
 
 export function search(params: SearchParams): Promise<SearchResponse> {
   return api
-    .post('/search', { query: params.keyword, use_cbeta: params.use_cbeta ?? false })
+    .post('/search', {
+      query: params.keyword,
+      use_cbeta: params.use_cbeta ?? false,
+      session_id: params.session_id,
+    })
     .then((r) => r.data);
+}
+
+export function getSessionResults(sessionId: number | string): Promise<SearchResultItem[]> {
+  return api.get(`/sessions/${sessionId}/results`).then((r) => r.data.results ?? []);
 }
 
 /* ── Files ── */
@@ -75,6 +85,10 @@ export function deleteFile(fileId: number | string): Promise<void> {
   return api.delete(`/files/${fileId}`).then(() => undefined);
 }
 
+export function reindexFile(fileId: number | string): Promise<void> {
+  return api.post(`/files/${fileId}/reindex`).then(() => undefined);
+}
+
 export function getFileUrl(fileId: number | string): string {
   return `${BASE_URL}/files/${fileId}/content`;
 }
@@ -84,6 +98,8 @@ export function getFileUrl(fileId: number | string): string {
 export interface Session {
   id: number;
   keyword: string;
+  traditional_keyword: string;
+  synthesis: string;
   created_at: string;
   updated_at: string;
   message_count: number;
@@ -143,14 +159,16 @@ export interface LLMSettings {
   base_url: string;
   api_key: string;
   model: string;
+  has_api_key?: boolean;
 }
 
 export function getSettings(): Promise<LLMSettings> {
   return api.get('/settings').then((r) => ({
     provider: r.data.llm_provider ?? 'DeepSeek',
     base_url: r.data.llm_provider_base_url ?? '',
-    api_key: r.data.has_api_key ? '********' : '',
+    api_key: '',
     model: r.data.llm_model_name ?? '',
+    has_api_key: r.data.has_api_key ?? false,
   }));
 }
 
@@ -159,14 +177,38 @@ export function updateSettings(settings: LLMSettings): Promise<LLMSettings> {
     .put('/settings', {
       llm_provider: settings.provider || undefined,
       llm_provider_base_url: settings.base_url || undefined,
-      llm_provider_api_key: settings.api_key === '********' ? undefined : settings.api_key || undefined,
+      llm_provider_api_key: settings.api_key || undefined,
       llm_model_name: settings.model || undefined,
     })
     .then((r) => ({
       provider: r.data.llm_provider ?? settings.provider,
       base_url: r.data.llm_provider_base_url ?? '',
-      api_key: r.data.has_api_key ? '********' : '',
+      api_key: '',
       model: r.data.llm_model_name ?? '',
+      has_api_key: r.data.has_api_key ?? false,
+    }));
+}
+
+/* ── App Settings ── */
+
+export interface AppSettings {
+  cbeta_max_results: number;
+  enable_thinking: boolean;
+}
+
+export function getAppSettings(): Promise<AppSettings> {
+  return api.get('/settings/app').then((r) => ({
+    cbeta_max_results: r.data.cbeta_max_results ?? 20,
+    enable_thinking: r.data.enable_thinking ?? false,
+  }));
+}
+
+export function updateAppSettings(settings: Partial<AppSettings>): Promise<AppSettings> {
+  return api
+    .patch('/settings/app', settings)
+    .then((r) => ({
+      cbeta_max_results: r.data.cbeta_max_results ?? 20,
+      enable_thinking: r.data.enable_thinking ?? false,
     }));
 }
 

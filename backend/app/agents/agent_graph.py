@@ -1,15 +1,15 @@
 """LangGraph multi-agent workflow for classical text search and analysis."""
 
 import logging
-from dataclasses import dataclass, field
+import operator
 from typing import Annotated, TypedDict
 
 import opencc
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from openai import OpenAI
+from openai.types.chat import ChatCompletionMessageParam
 from langgraph.graph import END, StateGraph
 
-from app.core.database import search_content, get_messages_by_session
+from app.core.database import search_content, get_messages_by_session, get_setting
 from app.services.cbeta_scraper import search_cbeta
 
 logger = logging.getLogger(__name__)
@@ -21,14 +21,18 @@ _t2s = opencc.OpenCC("t2s")
 
 # ── State definition ─────────────────────────────────────────────────────────
 
-class AgentState(TypedDict, total=False):
-    """Shared state flowing through the agent graph."""
+class _AgentStateRequired(TypedDict):
+    """Required keys for AgentState."""
     original_query: str
+
+
+class AgentState(_AgentStateRequired, total=False):
+    """Shared state flowing through the agent graph."""
     traditional_query: str
     use_cbeta: bool
-    local_hits: list[dict]
-    cbeta_hits: list[dict]
-    all_hits: list[dict]
+    local_hits: Annotated[list[dict], operator.add]
+    cbeta_hits: Annotated[list[dict], operator.add]
+    all_hits: Annotated[list[dict], operator.add]
     synthesis: str
     chat_history: list[dict]
     chat_reply: str
@@ -36,17 +40,17 @@ class AgentState(TypedDict, total=False):
 
 # ── Node functions ───────────────────────────────────────────────────────────
 
-def query_processor(state: AgentState) -> AgentState:
+def query_processor(state: AgentState) -> dict:
     """Convert the query from simplified to traditional Chinese."""
     original = state["original_query"]
     traditional = _s2t.convert(original)
     logger.info("Query: %s -> %s", original, traditional)
-    return {**state, "traditional_query": traditional}
+    return {"traditional_query": traditional}
 
 
-def local_searcher(state: AgentState) -> AgentState:
+def local_searcher(state: AgentState) -> dict:
     """Search the local SQLite FTS5 index."""
-    query = state["traditional_query"]
+    query = state.get("traditional_query", state["original_query"])
     # Also search the original (simplified) form
     original = state["original_query"]
 
@@ -63,25 +67,30 @@ def local_searcher(state: AgentState) -> AgentState:
             seen.add(key)
             unique.append(h)
 
-    return {**state, "local_hits": unique}
+    return {"local_hits": unique}
 
 
-def cbeta_scraper_node(state: AgentState) -> AgentState:
+def cbeta_scraper_node(state: AgentState) -> dict:
     """Optionally scrape CBETA online for additional results."""
     if not state.get("use_cbeta", False):
-        return {**state, "cbeta_hits": []}
+        return {"cbeta_hits": []}
 
-    query = state["traditional_query"]
+    query = state.get("traditional_query", state["original_query"])
     try:
-        results = search_cbeta(query)
+        # Read max_results from DB settings (default 20)
+        val = get_setting("cbeta_max_results")
+        max_results = int(val) if val else 20
+        results = search_cbeta(query, max_results=max_results)
         hits = [
             {
                 "source": "cbeta",
                 "filename": r.title,
-                "snippet": r.snippet,
-                "dynasty": "",
-                "author": "",
+                "snippet": r.snippets[0] if r.snippets else "",
+                "snippets": r.snippets,
+                "dynasty": r.dynasty,
+                "author": r.author,
                 "sutra_id": r.sutra_id,
+                "title": r.title,
             }
             for r in results
         ]
@@ -89,15 +98,15 @@ def cbeta_scraper_node(state: AgentState) -> AgentState:
         logger.exception("CBETA scraper failed")
         hits = []
 
-    return {**state, "cbeta_hits": hits}
+    return {"cbeta_hits": hits}
 
 
-def synthesizer(state: AgentState) -> AgentState:
-    """Merge local and CBETA hits, optionally call LLM for synthesis."""
+def synthesizer(state: AgentState) -> dict:
+    """Merge local and CBETA hits, call LLM for synthesis."""
     import app.config as cfg
 
-    local = state.get("local_hits", [])
-    cbeta = state.get("cbeta_hits", [])
+    local = list(state.get("local_hits", []))
+    cbeta = list(state.get("cbeta_hits", []))
 
     # Tag local hits
     for h in local:
@@ -109,85 +118,175 @@ def synthesizer(state: AgentState) -> AgentState:
     synthesis = ""
     if cfg.settings.llm_provider_api_key and all_hits:
         try:
-            llm = _get_llm()
+            client = _get_client()
             excerpts = "\n".join(
                 f"- [{h.get('source')}] {h.get('filename', '')}: {h.get('snippet', '')}"
                 for h in all_hits[:20]
             )
-            messages = [
-                SystemMessage(content=(
-                    "你是一位古籍研究助手。根据以下检索结果，"
-                    "总结该词语在古籍中的出处和上下文含义，按朝代排序。"
-                    "使用繁体中文回答。"
-                )),
-                HumanMessage(content=(
-                    f"检索词：{state['traditional_query']}\n\n"
+            messages: list[ChatCompletionMessageParam] = [
+                {"role": "system", "content": (
+                    "你是一位汉语言古籍研究助手。目前用户检索相应的词语文语料，得到了以下检索结果，"
+                    f"检索词：{state.get('traditional_query', '')}\n"
                     f"检索结果：\n{excerpts}"
-                )),
+                    "\n\n务必注意回答的专业性和准确性，并适当结合检索结果的例句，以及联网搜索得到的相关资料，理解该词语在古籍中的出处和上下文含义，根据用户的输入，为用户提供专业化的分析。"
+                )},
+                {"role": "user", "content": (
+                    "请你从汉语词汇史的角度梳理并分析用户所检索词语的中土化路径。\n"
+                )},
             ]
-            resp = llm.invoke(messages)
-            synthesis = resp.content
+            extra_kwargs = _thinking_kwargs()
+            resp = client.chat.completions.create(
+                model=cfg.settings.llm_model_name,
+                messages=messages,
+                **extra_kwargs,
+            )
+            synthesis = resp.choices[0].message.content
         except Exception:
             logger.exception("LLM synthesis failed")
 
-    return {**state, "all_hits": all_hits, "synthesis": synthesis}
+    return {"all_hits": all_hits, "synthesis": synthesis}
 
 
-def chat_agent(state: AgentState) -> AgentState:
+def synthesizer_streaming(state: AgentState, on_chunk=None):
+    """Merge local and CBETA hits, call LLM for streaming synthesis.
+    
+    Args:
+        state: Agent state
+        on_chunk: Optional callback(chunk_text: str) called for each token
+    
+    Returns:
+        dict with all_hits and synthesis (full text)
+    """
+    import app.config as cfg
+
+    local = list(state.get("local_hits", []))
+    cbeta = list(state.get("cbeta_hits", []))
+
+    # Tag local hits
+    for h in local:
+        h.setdefault("source", "local")
+
+    all_hits = local + cbeta
+
+    # If LLM is configured, produce a synthesis
+    synthesis = ""
+    if cfg.settings.llm_provider_api_key and all_hits:
+        try:
+            client = _get_client()
+            excerpts = "\n".join(
+                f"- [{h.get('source')}] {h.get('filename', '')}: {h.get('snippet', '')}"
+                for h in all_hits[:20]
+            )
+            messages: list[ChatCompletionMessageParam] = [
+                {"role": "system", "content": (
+                    "你是一位汉语言古籍研究助手。目前用户检索相应的词语文语料，得到了以下检索结果，"
+                    f"检索词：{state.get('traditional_query', '')}\n"
+                    f"检索结果：\n{excerpts}"
+                    "\n\n务必注意回答的专业性和准确性，并适当结合检索结果的例句，以及联网搜索得到的相关资料，理解该词语在古籍中的出处和上下文含义，根据用户的输入，为用户提供专业化的分析。"
+                )},
+                {"role": "user", "content": (
+                    "请从汉语词汇史的角度，结合汉译佛典和本土文献语料，梳理并分析用户所检索词语的中土化路径。\n"
+                )},
+            ]
+            extra_kwargs = _thinking_kwargs()
+            stream = client.chat.completions.create(
+                model=cfg.settings.llm_model_name,
+                messages=messages,
+                stream=True,
+                **extra_kwargs,
+            )
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    synthesis += content
+                    if on_chunk:
+                        on_chunk(content)
+        except Exception:
+            logger.exception("LLM streaming synthesis failed")
+
+    return {"all_hits": all_hits, "synthesis": synthesis}
+
+
+def chat_agent(state: AgentState) -> dict:
     """Handle multi-turn chat follow-up questions using LLM."""
     import app.config as cfg
 
     if not cfg.settings.llm_provider_api_key:
-        return {**state, "chat_reply": "LLM 未配置，请在设置中添加 API Key。"}
+        return {"chat_reply": "LLM 未配置，请在设置中添加 API Key。"}
 
     history = state.get("chat_history", [])
     if not history:
-        return state
+        return {}
+    local = list(state.get("local_hits", []))
+    cbeta = list(state.get("cbeta_hits", []))
 
+    # Tag local hits
+    for h in local:
+        h.setdefault("source", "local")
+
+    all_hits = local + cbeta
+    excerpts = "\n".join(
+                f"- [{h.get('source')}] {h.get('filename', '')}: {h.get('snippet', '')}"
+                for h in all_hits[:20]
+            )
     try:
-        llm = _get_llm()
-        messages = [
-            SystemMessage(content=(
-                "你是古籍研究助手，帮助用户查找和分析古典文献中的词语。"
-                "用繁体中文回答。如需搜索可告知用户使用搜索功能。"
-            ))
+        client = _get_client()
+        messages: list[ChatCompletionMessageParam] = [
+            {"role": "system", "content": (
+                    "你是一位汉语言古籍研究助手。目前用户检索相应的词语文语料，得到了以下检索结果，"
+                    f"检索词：{state.get('traditional_query', '')}\n"
+                    f"检索结果：\n{excerpts}"
+                    "\n\n务必注意回答的专业性和准确性，并适当结合检索结果的例句，以及联网搜索得到的相关资料，理解该词语在古籍中的出处和上下文含义，根据用户的输入，为用户提供专业化的分析。"
+            )}
         ]
         for msg in history:
-            if msg["role"] == "user":
-                messages.append(HumanMessage(content=msg["content"]))
-            else:
-                messages.append(AIMessage(content=msg["content"]))
+            messages.append({
+                "role": msg["role"],
+                "content": msg["content"],
+            })
 
-        resp = llm.invoke(messages)
-        return {**state, "chat_reply": resp.content}
+        extra_kwargs = _thinking_kwargs()
+        resp = client.chat.completions.create(
+            model=cfg.settings.llm_model_name,
+            messages=messages,
+            **extra_kwargs,
+        )
+        return {"chat_reply": resp.choices[0].message.content}
     except Exception:
         logger.exception("Chat agent failed")
-        return {**state, "chat_reply": "抱歉，处理请求时出错，请稍后再试。"}
+        return {"chat_reply": "抱歉，处理请求时出错，请稍后再试。"}
 
 
 # ── Helper ───────────────────────────────────────────────────────────────────
 
-def _get_llm() -> ChatOpenAI:
-    """Create an OpenAI-compatible LLM client from current settings.
+def _get_client() -> OpenAI:
+    """Create an OpenAI-compatible client from current settings.
 
     All supported providers (DeepSeek, Qwen, Kimi, MiniMax) expose
-    OpenAI-compatible endpoints, so we use ChatOpenAI for all of them.
+    OpenAI-compatible endpoints, so we use the openai SDK for all of them.
     """
     import app.config as cfg
 
     current = cfg.settings
     if not current.llm_provider_api_key:
         raise ValueError("LLM API Key 未配置")
-    return ChatOpenAI(
-        model=current.llm_model_name,
+    return OpenAI(
         api_key=current.llm_provider_api_key,
         base_url=current.llm_provider_base_url or None,
     )
 
 
+def _thinking_kwargs() -> dict:
+    """Return extra kwargs for chat.completions.create when thinking mode is on."""
+    enable_thinking = get_setting("enable_thinking")
+    if enable_thinking == "true":
+        return {"extra_body": {"enable_thinking": True, "enable_search": True}}
+    return {}
+
+
 # ── Graph construction ───────────────────────────────────────────────────────
 
-def build_search_graph() -> StateGraph:
+def build_search_graph():
     """Build and compile the search workflow graph."""
     graph = StateGraph(AgentState)
 
@@ -206,7 +305,7 @@ def build_search_graph() -> StateGraph:
     return graph.compile()
 
 
-def build_chat_graph() -> StateGraph:
+def build_chat_graph():
     """Build and compile the chat workflow graph."""
     graph = StateGraph(AgentState)
 
@@ -262,3 +361,135 @@ def run_chat(message: str, history: list[dict],
     }
     result = chat_graph.invoke(state)
     return result.get("chat_reply", "")
+
+
+def run_search_streaming(query: str, use_cbeta: bool = False, on_chunk=None) -> dict:
+    """Execute the search pipeline with streaming synthesis.
+    
+    Args:
+        query: Search query
+        use_cbeta: Whether to search CBETA
+        on_chunk: Optional callback(chunk_text: str) for streaming synthesis
+    
+    Returns:
+        dict with all_hits, synthesis, traditional_query
+    """
+    # Build initial state
+    state = {
+        "original_query": query,
+        "traditional_query": "",
+        "use_cbeta": use_cbeta,
+        "local_hits": [],
+        "cbeta_hits": [],
+        "all_hits": [],
+        "synthesis": "",
+    }
+    
+    # Run query processor
+    query_result = query_processor(state)  # type: ignore
+    state.update(query_result)  # type: ignore
+    
+    # Run local and CBETA search in parallel
+    local_result = local_searcher(state)  # type: ignore
+    cbeta_result = cbeta_scraper_node(state)  # type: ignore
+    state.update(local_result)  # type: ignore
+    state.update(cbeta_result)  # type: ignore
+    
+    # Run streaming synthesizer
+    synth_result = synthesizer_streaming(state, on_chunk=on_chunk)  # type: ignore
+    state.update(synth_result)  # type: ignore
+    
+    return state  # type: ignore
+
+
+def run_chat_streaming(message: str, history: list[dict],
+                       session_id: int | None = None,
+                       synthesis: str = "",
+                       on_chunk=None) -> str:
+    """Run a chat turn with streaming response.
+    
+    Args:
+        message: User message
+        history: Chat history
+        session_id: Optional session ID for loading history from DB
+        synthesis: Optional synthesis from search phase to include in context
+        on_chunk: Optional callback(chunk_text: str) for streaming
+    
+    Returns:
+        Complete assistant reply
+    """
+    import app.config as cfg
+
+    if not cfg.settings.llm_provider_api_key:
+        return "LLM 未配置，请在设置中添加 API Key。"
+
+    if session_id is not None and not history:
+        db_msgs = get_messages_by_session(session_id)
+        history = [
+            {"role": m["role"], "content": m["content"]}
+            for m in db_msgs
+        ]
+    
+    # Get search context
+    search_result = run_search(query=message, use_cbeta=False)
+    local = list(search_result.get("local_hits", []))
+    cbeta = list(search_result.get("cbeta_hits", []))
+    
+    for h in local:
+        h.setdefault("source", "local")
+    all_hits = local + cbeta
+    
+    excerpts = "\n".join(
+        f"- [{h.get('source')}] {h.get('filename', '')}: {h.get('snippet', '')}"
+        for h in all_hits[:20]
+    )
+    
+    # Build system prompt with synthesis context if available
+    system_content = (
+        "你是一位汉语言古籍研究助手。目前用户检索相应的词语文语料，得到了以下检索结果，"
+        f"检索词：{search_result.get('traditional_query', '')}\n"
+        f"检索结果：\n{excerpts}"
+    )
+    if synthesis:
+        system_content += (
+            "\n\n以下是 AI 对该词语的分析结果：\n"
+            f"{synthesis}"
+        )
+    system_content += (
+        "\n\n务必注意回答的专业性和准确性，并适当结合检索结果的例句和上述分析结果，"
+        "以及联网搜索得到的相关资料，理解该词语在古籍中的出处和上下文含义，"
+        "根据用户的输入，为用户提供专业化的分析。"
+    )
+    
+    try:
+        client = _get_client()
+        messages: list[ChatCompletionMessageParam] = [
+            {"role": "system", "content": system_content}
+        ]
+        for msg in history:
+            messages.append({
+                "role": msg["role"],
+                "content": msg["content"],
+            })
+        messages.append({"role": "user", "content": message})
+        
+        extra_kwargs = _thinking_kwargs()
+        stream = client.chat.completions.create(
+            model=cfg.settings.llm_model_name,
+            messages=messages,
+            stream=True,
+            **extra_kwargs,
+        )
+        
+        reply = ""
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                content = chunk.choices[0].delta.content
+                reply += content
+                if on_chunk:
+                    on_chunk(content)
+        
+        return reply
+    except Exception:
+        logger.exception("Streaming chat failed")
+        return "抱歉，处理请求时出错，请稍后再试。"

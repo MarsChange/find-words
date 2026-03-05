@@ -1,5 +1,6 @@
 """SQLite + FTS5 full-text search engine for classical text content."""
 
+import json
 import re
 import sqlite3
 import threading
@@ -10,6 +11,35 @@ from typing import Generator
 from app.config import settings
 
 _local = threading.local()
+
+# CJK Unicode ranges — used to insert spaces so each character becomes
+# an individual FTS5 token, enabling substring matching on Chinese text.
+_CJK_RE = re.compile(
+    r'([\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff'
+    r'\u2f00-\u2fdf\u2e80-\u2eff])'
+)
+
+
+def _tokenize_cjk(text: str) -> str:
+    """Insert spaces around CJK characters for character-level FTS5 tokenization."""
+    return _CJK_RE.sub(r' \1 ', text)
+
+
+# Regex to collapse spaces between adjacent CJK characters (reverse of _tokenize_cjk)
+_CJK_SPACE_RE = re.compile(
+    r'(?<=[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff'
+    r'\u2f00-\u2fdf\u2e80-\u2eff])'
+    r'\s+'
+    r'(?=[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff'
+    r'\u2f00-\u2fdf\u2e80-\u2eff])'
+)
+
+
+def _clean_snippet(raw: str) -> str:
+    """Remove FTS5 highlight markers and CJK tokenization spaces from snippets."""
+    cleaned = raw.replace("\u3010", "").replace("\u3011", "")
+    cleaned = _CJK_SPACE_RE.sub("", cleaned)
+    return cleaned.strip()
 
 
 def _get_connection() -> sqlite3.Connection:
@@ -61,8 +91,10 @@ def init_db() -> None:
             );
 
             CREATE TABLE IF NOT EXISTS sessions (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                keyword    TEXT    NOT NULL DEFAULT '',
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                keyword              TEXT    NOT NULL DEFAULT '',
+                traditional_keyword  TEXT    NOT NULL DEFAULT '',
+                synthesis            TEXT    NOT NULL DEFAULT '',
                 created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M', 'now', 'localtime')),
                 updated_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M', 'now', 'localtime'))
             );
@@ -74,8 +106,45 @@ def init_db() -> None:
                 content    TEXT    NOT NULL,
                 created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime'))
             );
+
+            CREATE TABLE IF NOT EXISTS search_results (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                source     TEXT    NOT NULL DEFAULT 'local',
+                file_id    INTEGER,
+                filename   TEXT    DEFAULT '',
+                page_num   INTEGER,
+                snippet    TEXT    DEFAULT '',
+                dynasty    TEXT    DEFAULT '',
+                author     TEXT    DEFAULT '',
+                sutra_id   TEXT,
+                title      TEXT,
+                created_at TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime'))
+            );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('cbeta_max_results', '20');
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('enable_thinking', 'false');
             """
         )
+        # Migrate existing databases: add traditional_keyword column if missing
+        try:
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN traditional_keyword TEXT NOT NULL DEFAULT ''"
+            )
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        # Migrate existing databases: add synthesis column if missing
+        try:
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN synthesis TEXT NOT NULL DEFAULT ''"
+            )
+        except sqlite3.OperationalError:
+            pass  # Column already exists
 
 
 # ── File CRUD ────────────────────────────────────────────────────────────────
@@ -150,6 +219,15 @@ def delete_file(file_id: int) -> None:
         conn.execute("DELETE FROM files WHERE id=?", (file_id,))
 
 
+def clear_file_content(file_id: int) -> None:
+    """Remove all indexed content for a file (for re-indexing)."""
+    with get_db() as conn:
+        conn.execute(
+            "DELETE FROM content_fts WHERE file_id=?",
+            (str(file_id),),
+        )
+
+
 # ── Content indexing ─────────────────────────────────────────────────────────
 
 def index_page(file_id: int, page_num: int, content: str) -> None:
@@ -158,7 +236,7 @@ def index_page(file_id: int, page_num: int, content: str) -> None:
         conn.execute(
             "INSERT INTO content_fts (file_id, page_num, content) "
             "VALUES (?, ?, ?)",
-            (str(file_id), str(page_num), content),
+            (str(file_id), str(page_num), _tokenize_cjk(content)),
         )
 
 
@@ -168,7 +246,7 @@ def index_pages_batch(rows: list[tuple[int, int, str]]) -> None:
         conn.executemany(
             "INSERT INTO content_fts (file_id, page_num, content) "
             "VALUES (?, ?, ?)",
-            [(str(fid), str(pn), c) for fid, pn, c in rows],
+            [(str(fid), str(pn), _tokenize_cjk(c)) for fid, pn, c in rows],
         )
 
 
@@ -179,15 +257,17 @@ _FTS5_SPECIAL = re.compile(r'["\*\(\)\+\-\^:{}]')
 
 
 def _sanitize_fts5_query(raw: str) -> str:
-    """Escape special FTS5 MATCH characters to prevent query injection.
+    """Escape special FTS5 MATCH characters and tokenize CJK for matching.
 
-    Wraps the sanitized query in double-quotes so it is treated as a
-    literal phrase by the FTS5 engine.
+    CJK characters are spaced out so the query matches the character-level
+    tokens stored in the index.  The result is wrapped in double-quotes
+    so FTS5 treats it as a literal phrase.
     """
     cleaned = _FTS5_SPECIAL.sub(" ", raw).strip()
     if not cleaned:
         return '""'
-    # Wrap in quotes so FTS5 treats it as a phrase / literal string
+    # Tokenize CJK characters to match the indexed format
+    cleaned = _tokenize_cjk(cleaned)
     escaped = cleaned.replace('"', ' ')
     return f'"{escaped}"'
 
@@ -221,7 +301,12 @@ def search_content(query: str, limit: int = 100) -> list[dict]:
             """,
             (safe_query, limit),
         ).fetchall()
-        return [dict(r) for r in rows]
+        results = []
+        for r in rows:
+            d = dict(r)
+            d["snippet"] = _clean_snippet(d.get("snippet", ""))
+            results.append(d)
+        return results
 
 
 # ── Session CRUD ─────────────────────────────────────────────────────────────
@@ -301,6 +386,118 @@ def add_message(session_id: int, role: str, content: str) -> dict:
 
 
 def delete_session(session_id: int) -> None:
-    """Delete a session and all its messages (CASCADE)."""
+    """Delete a session and all its messages and search results (CASCADE)."""
     with get_db() as conn:
         conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+
+
+def update_session_traditional_keyword(session_id: int,
+                                       traditional_keyword: str) -> None:
+    """Store the traditional Chinese keyword on a session."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE sessions SET traditional_keyword=? WHERE id=?",
+            (traditional_keyword, session_id),
+        )
+
+
+def update_session_synthesis(session_id: int, synthesis: str) -> None:
+    """Store the AI synthesis text on a session."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE sessions SET synthesis=? WHERE id=?",
+            (synthesis, session_id),
+        )
+
+
+# ── Search Results CRUD ──────────────────────────────────────────────────────
+
+def insert_search_results(session_id: int, hits: list[dict]) -> None:
+    """Batch-insert search result hits for a session.
+
+    The ``snippets`` list (if present) is JSON-serialised into the
+    ``snippet`` column so that no schema migration is needed.  For
+    local results that only carry a single ``snippet`` string, the
+    value is stored as-is.
+    """
+    if not hits:
+        return
+    with get_db() as conn:
+        conn.executemany(
+            """INSERT INTO search_results
+               (session_id, source, file_id, filename, page_num,
+                snippet, dynasty, author, sutra_id, title)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (
+                    session_id,
+                    h.get("source", "local"),
+                    int(h["file_id"]) if h.get("file_id") else None,
+                    h.get("filename", ""),
+                    int(h["page_num"]) if h.get("page_num") else None,
+                    json.dumps(h["snippets"], ensure_ascii=False)
+                    if h.get("snippets")
+                    else h.get("snippet", ""),
+                    h.get("dynasty", ""),
+                    h.get("author", ""),
+                    h.get("sutra_id"),
+                    h.get("title"),
+                )
+                for h in hits
+            ],
+        )
+
+
+def get_search_results_by_session(session_id: int) -> list[dict]:
+    """Return all search results for a session ordered by id.
+
+    If the ``snippet`` column contains a JSON array string, it is
+    parsed back into a ``snippets`` list on the returned dict.
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM search_results WHERE session_id=? ORDER BY id ASC",
+            (session_id,),
+        ).fetchall()
+        results = []
+        for r in rows:
+            d = dict(r)
+            snippet_val = d.get("snippet", "")
+            if snippet_val.startswith("["):
+                try:
+                    d["snippets"] = json.loads(snippet_val)
+                    d["snippet"] = d["snippets"][0] if d["snippets"] else ""
+                except (json.JSONDecodeError, TypeError):
+                    d["snippets"] = [snippet_val] if snippet_val else []
+            else:
+                d["snippets"] = [snippet_val] if snippet_val else []
+            results.append(d)
+        return results
+
+
+# ── Settings CRUD ────────────────────────────────────────────────────────────
+
+def get_setting(key: str) -> str | None:
+    """Return a setting value by key, or None if not found."""
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key=?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+
+def set_setting(key: str, value: str) -> None:
+    """Insert or update a setting."""
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+
+
+def get_all_settings() -> dict[str, str]:
+    """Return all settings as a dict."""
+    with get_db() as conn:
+        rows = conn.execute("SELECT key, value FROM settings").fetchall()
+        return {r["key"]: r["value"] for r in rows}

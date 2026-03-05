@@ -1,31 +1,203 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import SessionList from '@/components/SessionList';
+import { highlightKeyword } from '@/components/SearchResultCard';
 import {
-  chat,
   getSessions,
   getSession,
+  getSessionResults,
   deleteSession as apiDeleteSession,
   type Session,
   type ChatMessage,
+  type SearchResultItem,
 } from '@/services/api';
+import { wsService } from '@/services/websocket';
 
 interface ChatSidebarProps {
   keyword?: string;
+  traditionalKeyword?: string;
   sessionId?: number;
+  synthesis?: string;
   onSessionChange?: (sessionId: number | undefined) => void;
 }
 
-export default function ChatSidebar({ sessionId, onSessionChange }: ChatSidebarProps) {
+/* ── Collapsible search results panel ── */
+
+function SessionResultsPanel({ sessionId, keyword, traditionalKeyword }: { sessionId: number; keyword?: string; traditionalKeyword?: string }) {
+  const [results, setResults] = useState<SearchResultItem[]>([]);
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    setResults([]);
+    setIsExpanded(false);
+    setLoaded(false);
+  }, [sessionId]);
+
+  const handleToggle = async () => {
+    if (!loaded) {
+      setIsLoading(true);
+      try {
+        const data = await getSessionResults(sessionId);
+        setResults(data);
+      } catch {
+        setResults([]);
+      } finally {
+        setIsLoading(false);
+        setLoaded(true);
+      }
+    }
+    setIsExpanded((prev) => !prev);
+  };
+
+  const localResults = results.filter((r) => r.source === 'local');
+  const cbetaResults = results.filter((r) => r.source === 'cbeta');
+
+  return (
+    <div className="border-b border-parchment-200">
+      <button
+        onClick={handleToggle}
+        className="flex w-full items-center justify-between px-4 py-2 text-xs text-ink-700 transition-colors hover:bg-parchment-100"
+      >
+        <span className="flex items-center gap-1.5 font-medium">
+          <svg
+            className={`h-3 w-3 transition-transform ${isExpanded ? 'rotate-90' : ''}`}
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+          </svg>
+          检索条目
+          {loaded && (
+            <span className="text-parchment-400">({results.length})</span>
+          )}
+        </span>
+        {isLoading && (
+          <span className="h-3 w-3 animate-spin rounded-full border border-parchment-300 border-t-cinnabar-500" />
+        )}
+      </button>
+
+      {isExpanded && loaded && (
+        <div className="max-h-64 overflow-y-auto px-3 pb-2">
+          {results.length === 0 ? (
+            <p className="py-2 text-center text-xs text-parchment-400">暂无检索条目</p>
+          ) : (
+            <>
+              {localResults.length > 0 && (
+                <div className="mb-2">
+                  <p className="mb-1 text-xs font-medium text-ink-600">本地文献</p>
+                  <div className="space-y-1">
+                    {localResults.map((r, i) => (
+                      <ResultItem key={`local-${i}`} result={r} keyword={keyword} traditionalKeyword={traditionalKeyword} />
+                    ))}
+                  </div>
+                </div>
+              )}
+              {cbetaResults.length > 0 && (
+                <div>
+                  <p className="mb-1 text-xs font-medium text-cinnabar-600">CBETA 佛典</p>
+                  <div className="space-y-1">
+                    {cbetaResults.map((r, i) => (
+                      <ResultItem key={`cbeta-${i}`} result={r} keyword={keyword} traditionalKeyword={traditionalKeyword} />
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ResultItem({ result, keyword, traditionalKeyword }: { result: SearchResultItem; keyword?: string; traditionalKeyword?: string }) {
+  const isCbeta = result.source === 'cbeta';
+  const snippetCount = result.snippets && result.snippets.length > 0 ? result.snippets.length : 0;
+  const displaySnippet = result.snippets && result.snippets.length > 0 ? result.snippets[0] : result.snippet;
+
+  return (
+    <div className="rounded border border-parchment-200 bg-parchment-50 px-2 py-1.5 text-xs">
+      <div className="flex items-center gap-1.5">
+        {result.dynasty && (
+          <span className="rounded bg-cinnabar-500/10 px-1 py-0.5 font-serif text-cinnabar-600">
+            {result.dynasty}
+          </span>
+        )}
+        {result.source === 'local' && (
+          <span className="rounded bg-emerald-500/10 px-1 py-0.5 text-emerald-600">本地</span>
+        )}
+        {isCbeta && (
+          <span className="rounded bg-amber-500/10 px-1 py-0.5 text-amber-700">CBETA</span>
+        )}
+        <span className="truncate font-serif font-medium text-ink-800">{result.filename}</span>
+      </div>
+      {result.author && (
+        <span className="text-parchment-400">{result.author}</span>
+      )}
+      <p className="mt-0.5 line-clamp-2 font-serif leading-snug text-ink-700">
+        {keyword ? highlightKeyword(displaySnippet, keyword, traditionalKeyword) : displaySnippet}
+      </p>
+      {snippetCount > 1 && (
+        <p className="mt-0.5 text-parchment-400">共 {snippetCount} 筆</p>
+      )}
+    </div>
+  );
+}
+
+/* ── Main ChatSidebar ── */
+
+export default function ChatSidebar({ keyword, traditionalKeyword, sessionId, synthesis, onSessionChange }: ChatSidebarProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isOpen, setIsOpen] = useState(true);
+  const [streamingMessage, setStreamingMessage] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, streamingMessage]);
+
+  // Setup WebSocket listeners for chat
+  useEffect(() => {
+    const unsubStarted = wsService.on('chat_started', () => {
+      setIsLoading(true);
+      setStreamingMessage('');
+    });
+    
+    const unsubChunk = wsService.on('chat_chunk', (data) => {
+      setStreamingMessage((prev) => prev + (data.chunk as string || ''));
+    });
+    
+    const unsubComplete = wsService.on('chat_complete', (data) => {
+      setIsLoading(false);
+      const reply = data.reply as string;
+      setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
+      setStreamingMessage('');
+      loadSessions();
+    });
+    
+    const unsubError = wsService.on('chat_error', () => {
+      setIsLoading(false);
+      setMessages((prev) => [
+        ...prev,
+        { role: 'assistant', content: '抱歉，请求出错，请稍后重试。' },
+      ]);
+      setStreamingMessage('');
+    });
+    
+    return () => {
+      unsubStarted();
+      unsubChunk();
+      unsubComplete();
+      unsubError();
+    };
+  }, []);
 
   // Load sessions list
   const loadSessions = useCallback(async () => {
@@ -92,24 +264,16 @@ export default function ChatSidebar({ sessionId, onSessionChange }: ChatSidebarP
     setMessages((prev) => [...prev, userMsg]);
     setInput('');
     setIsLoading(true);
+    setStreamingMessage('');
 
-    try {
-      const data = await chat({
-        message: text,
-        session_id: sessionId,
-        history: messages,
-      });
-      setMessages((prev) => [...prev, { role: 'assistant', content: data.reply }]);
-      // Refresh sessions list to pick up updated timestamps / message counts
-      loadSessions();
-    } catch {
-      setMessages((prev) => [
-        ...prev,
-        { role: 'assistant', content: '抱歉，请求出错，请稍后重试。' },
-      ]);
-    } finally {
-      setIsLoading(false);
-    }
+    // Send chat request via WebSocket
+    wsService.send({
+      type: 'chat_stream',
+      message: text,
+      session_id: sessionId,
+      history: messages,
+      synthesis: synthesis || '',
+    });
   };
 
   if (!isOpen) {
@@ -152,6 +316,9 @@ export default function ChatSidebar({ sessionId, onSessionChange }: ChatSidebarP
         onNewSession={handleNewSession}
       />
 
+      {/* Search results for active session (collapsed by default) */}
+      {sessionId && <SessionResultsPanel sessionId={sessionId} keyword={keyword} traditionalKeyword={traditionalKeyword} />}
+
       {/* Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3">
         {messages.length === 0 && (
@@ -168,10 +335,22 @@ export default function ChatSidebar({ sessionId, onSessionChange }: ChatSidebarP
                 : 'mr-4 bg-parchment-100 text-ink-800'
             }`}
           >
-            {msg.content}
+            {msg.role === 'assistant' ? (
+              <div className="prose prose-sm max-w-none prose-headings:text-ink-800 prose-strong:text-ink-800 prose-p:my-1 prose-li:my-0">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+              </div>
+            ) : msg.content}
           </div>
         ))}
-        {isLoading && (
+        {streamingMessage && (
+          <div className="mr-4 rounded-lg bg-parchment-100 px-3 py-2 text-sm text-ink-800">
+            <div className="prose prose-sm max-w-none prose-headings:text-ink-800 prose-strong:text-ink-800 prose-p:my-1 prose-li:my-0">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingMessage}</ReactMarkdown>
+            </div>
+            <span className="inline-block h-4 w-1 animate-pulse bg-cinnabar-500 ml-0.5"></span>
+          </div>
+        )}
+        {isLoading && !streamingMessage && (
           <div className="mr-4 rounded-lg bg-parchment-100 px-3 py-2 text-sm text-parchment-400">
             思考中...
           </div>

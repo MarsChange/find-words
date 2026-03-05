@@ -1,8 +1,6 @@
-"""File upload and management API endpoints with WebSocket progress."""
+"""File upload and management API endpoints."""
 
-import asyncio
 import logging
-import os
 import uuid
 from pathlib import Path
 
@@ -10,17 +8,18 @@ from fastapi import (
     APIRouter,
     HTTPException,
     UploadFile,
-    WebSocket,
-    WebSocketDisconnect,
 )
+from fastapi.responses import FileResponse
 
 from app.config import settings
 from app.core.database import (
+    clear_file_content,
     delete_file,
     get_file,
     insert_file,
     list_files,
     update_file_metadata,
+    update_file_status,
 )
 from app.models.schemas import (
     FileListResponse,
@@ -33,9 +32,6 @@ from app.services.pdf_processor import process_pdf_background
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/files", tags=["files"])
-
-# Active WebSocket connections for progress updates
-_progress_sockets: dict[int, WebSocket] = {}
 
 # Maximum upload size: 1024 MB
 _MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
@@ -55,7 +51,7 @@ async def upload_file(file: UploadFile) -> FileUploadResponse:
     Upload a PDF file for indexing.
 
     The file is saved to disk and processing starts in a background thread.
-    Connect to the WebSocket endpoint to receive progress updates.
+    Progress is broadcast via the global /ws WebSocket endpoint.
     """
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="仅支持 PDF 文件")
@@ -88,25 +84,27 @@ async def upload_file(file: UploadFile) -> FileUploadResponse:
 
     file_id = insert_file(filename=file.filename, filepath=str(dest))
 
-    # Define a progress callback that pushes to WebSocket
-    def _progress(current: int, total: int) -> None:
-        ws = _progress_sockets.get(file_id)
-        if ws:
-            try:
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(
-                    ws.send_json(
-                        {"file_id": file_id, "current": current, "total": total}
-                    )
-                )
-                loop.close()
-            except Exception:
-                pass
-
-    process_pdf_background(file_id, str(dest), progress_callback=_progress)
+    # Start background processing (progress broadcast via WebSocket)
+    process_pdf_background(file_id, str(dest))
 
     return FileUploadResponse(
         id=file_id, filename=file.filename, status="processing"
+    )
+
+
+@router.get("/{file_id}/content")
+async def get_file_content(file_id: int):
+    """Serve the actual PDF file for the reader viewer."""
+    f = get_file(file_id)
+    if not f:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    filepath = Path(f["filepath"])
+    if not filepath.exists():
+        raise HTTPException(status_code=404, detail="PDF 文件不存在于磁盘")
+    return FileResponse(
+        str(filepath),
+        media_type="application/pdf",
+        filename=f["filename"],
     )
 
 
@@ -147,31 +145,19 @@ async def remove_file(file_id: int) -> dict:
     return {"detail": "文件已删除"}
 
 
-_ALLOWED_WS_ORIGINS = {"http://localhost:5173", "http://127.0.0.1:5173"}
+@router.post("/{file_id}/reindex")
+async def reindex_file(file_id: int) -> dict:
+    """Re-process a file (e.g. after OCR support is added)."""
+    f = get_file(file_id)
+    if not f:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    filepath = f["filepath"]
+    if not Path(filepath).exists():
+        raise HTTPException(status_code=404, detail="PDF 文件不存在于磁盘")
 
+    # Clear existing indexed content and reset status
+    clear_file_content(file_id)
+    update_file_status(file_id, "processing")
 
-@router.websocket("/ws/progress/{file_id}")
-async def file_progress_ws(websocket: WebSocket, file_id: int) -> None:
-    """WebSocket endpoint for real-time file processing progress."""
-    # Validate origin to prevent cross-site WebSocket hijacking
-    origin = (websocket.headers.get("origin") or "").rstrip("/")
-    if origin and origin not in _ALLOWED_WS_ORIGINS:
-        await websocket.close(code=4003)
-        return
-
-    await websocket.accept()
-    _progress_sockets[file_id] = websocket
-    try:
-        # Keep connection alive until client disconnects or file is done
-        while True:
-            f = get_file(file_id)
-            if f and f["status"] in ("ready", "error"):
-                await websocket.send_json(
-                    {"file_id": file_id, "status": f["status"]}
-                )
-                break
-            await asyncio.sleep(1)
-    except WebSocketDisconnect:
-        pass
-    finally:
-        _progress_sockets.pop(file_id, None)
+    process_pdf_background(file_id, filepath)
+    return {"detail": "重新索引已开始", "file_id": file_id}

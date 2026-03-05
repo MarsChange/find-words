@@ -4,7 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -57,6 +57,13 @@ app.include_router(files_router)
 app.include_router(chat_router)
 app.include_router(settings_router)
 
+# Global WebSocket endpoint for real-time events
+from app.core.ws_manager import ws_endpoint
+
+@app.websocket("/ws")
+async def websocket_route(websocket: WebSocket):
+    await ws_endpoint(websocket)
+
 
 @app.get("/api/health")
 async def health_check():
@@ -78,7 +85,8 @@ if _static_dir and _static_dir.is_dir():
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
         """Serve the frontend SPA for any non-API route."""
-        file_path = _static_dir / full_path
-        if file_path.is_file():
+        file_path = (_static_dir / full_path).resolve()
+        # Prevent path traversal outside the static directory
+        if file_path.is_file() and str(file_path).startswith(str(_static_dir.resolve())):
             return FileResponse(str(file_path))
         return FileResponse(str(_static_dir / "index.html"))
