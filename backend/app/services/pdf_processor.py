@@ -6,7 +6,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
-
+import sys
 import fitz  # PyMuPDF
 
 from app.core.database import (
@@ -26,28 +26,77 @@ _OCR_WORKERS = min(os.cpu_count() or 4, 10)
 # Lazy-loaded RapidOCR instance (heavy to initialize)
 _ocr_engine = None
 _ocr_lock = threading.Lock()
+_ocr_init_failed = False  # Flag to avoid retrying after failure
 
 
 def _get_ocr():
-    """Get or create the RapidOCR engine (thread-safe singleton)."""
-    global _ocr_engine
+    """Get or create the RapidOCR engine (thread-safe singleton).
+
+    Uses a timeout to prevent hanging when ONNX model files are missing
+    or not loadable (common in PyInstaller bundles).
+    """
+    global _ocr_engine, _ocr_init_failed
     if _ocr_engine is not None:
         return _ocr_engine
+    if _ocr_init_failed:
+        return None
     with _ocr_lock:
         if _ocr_engine is not None:
             return _ocr_engine
-        try:
-            from rapidocr_onnxruntime import RapidOCR
-            _ocr_engine = RapidOCR()
+        if _ocr_init_failed:
+            return None
+
+        # In PyInstaller bundles, rapidocr_onnxruntime resolves model paths
+        # via Path(__file__).parent and uses importlib.import_module() with
+        # bare module names.  Ensure sys.path includes the package directory.
+        if getattr(sys, 'frozen', False):
+            import importlib
+            _meipass = getattr(sys, '_MEIPASS', '')
+            _rpkg = os.path.join(_meipass, 'rapidocr_onnxruntime')
+            if os.path.isdir(_rpkg) and _rpkg not in sys.path:
+                sys.path.insert(0, _rpkg)
+                logger.debug("Added %s to sys.path for OCR sub-modules", _rpkg)
+
+        # Try to initialize in a thread with timeout to avoid hanging
+        result = [None]
+        error = [None]
+
+        def _init():
+            try:
+                from rapidocr_onnxruntime import RapidOCR
+                result[0] = RapidOCR()
+            except Exception as e:
+                error[0] = e
+
+        init_thread = threading.Thread(target=_init, daemon=True)
+        init_thread.start()
+        init_thread.join(timeout=60)  # 60 second timeout (first load is slow)
+
+        if init_thread.is_alive():
+            logger.warning(
+                "RapidOCR initialization timed out (>60s). "
+                "OCR is disabled. Scanned PDFs will not be indexed."
+            )
+            _ocr_init_failed = True
+            return None
+
+        if error[0] is not None:
+            logger.warning(
+                "RapidOCR initialization failed: %s. "
+                "Scanned PDFs will not be indexed.",
+                error[0],
+            )
+            _ocr_init_failed = True
+            return None
+
+        if result[0] is not None:
+            _ocr_engine = result[0]
             logger.info("RapidOCR engine initialized")
             return _ocr_engine
-        except ImportError:
-            logger.warning(
-                "rapidocr_onnxruntime not installed. "
-                "Scanned PDFs will not be indexed. "
-                "Install with: pip install rapidocr_onnxruntime"
-            )
-            return None
+
+        logger.warning("RapidOCR initialization returned None")
+        _ocr_init_failed = True
+        return None
 
 
 def _render_and_ocr(raw: bytes, page_idx: int) -> tuple[int, str]:
@@ -65,7 +114,7 @@ def _render_and_ocr(raw: bytes, page_idx: int) -> tuple[int, str]:
         result, _ = ocr(img_bytes)
         if not result:
             return (page_idx + 1, "")
-        lines = [text for _, text, score in result if score > 0.5]
+        lines = [text for _, text, score in result if float(score) > 0.5]
         return (page_idx + 1, "\n".join(lines))
     except Exception:
         logger.debug("OCR failed for page %d", page_idx + 1, exc_info=True)

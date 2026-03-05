@@ -2,14 +2,36 @@ const { app, BrowserWindow, dialog } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const http = require('http');
+const net = require('net');
 const fs = require('fs');
 
 let mainWindow = null;
 let backendProcess = null;
 
-const BACKEND_PORT = 8000;
-const BACKEND_URL = `http://localhost:${BACKEND_PORT}`;
+const DEFAULT_BACKEND_PORT = 8000;
+let backendPort = DEFAULT_BACKEND_PORT;
+let backendUrl = `http://localhost:${backendPort}`;
 const IS_DEV = !app.isPackaged;
+
+function isPortAvailable(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', () => resolve(false));
+    server.once('listening', () => {
+      server.close(() => resolve(true));
+    });
+    server.listen(port, '127.0.0.1');
+  });
+}
+
+async function findAvailablePort(startPort = DEFAULT_BACKEND_PORT, maxTries = 20) {
+  for (let offset = 0; offset < maxTries; offset += 1) {
+    const port = startPort + offset;
+    const available = await isPortAvailable(port);
+    if (available) return port;
+  }
+  throw new Error(`No available backend port found from ${startPort} to ${startPort + maxTries - 1}`);
+}
 
 /**
  * Resolve the path to the bundled Python backend executable.
@@ -60,24 +82,29 @@ function getFrontendDistPath() {
 /**
  * Start the Python backend as a subprocess.
  */
-function startBackend() {
+async function startBackend() {
   const backendPath = getBackendPath();
   if (!backendPath) {
     console.log('[Electron] Dev mode: skipping backend launch');
     return;
   }
 
+  backendPort = await findAvailablePort(DEFAULT_BACKEND_PORT, 20);
+  backendUrl = `http://localhost:${backendPort}`;
+
   const dataDir = getDataDir();
   const frontendDist = getFrontendDistPath();
 
   const env = {
     ...process.env,
+    FINDWORDS_PORT: String(backendPort),
     FINDWORDS_DATA_DIR: dataDir,
     FINDWORDS_CONFIG_PATH: path.join(dataDir, 'config.json'),
     FINDWORDS_STATIC_DIR: frontendDist || '',
   };
 
   console.log(`[Electron] Starting backend: ${backendPath}`);
+  console.log(`[Electron] Backend URL: ${backendUrl}`);
   console.log(`[Electron] Data directory: ${dataDir}`);
 
   backendProcess = spawn(backendPath, [], {
@@ -102,13 +129,13 @@ function startBackend() {
 /**
  * Wait for the backend to be ready by polling the health endpoint.
  */
-function waitForBackend(retries = 30, interval = 500) {
+function waitForBackend(retries = 240, interval = 500) {
   return new Promise((resolve, reject) => {
     let attempts = 0;
 
     const check = () => {
       attempts++;
-      const req = http.get(`${BACKEND_URL}/api/health`, (res) => {
+      const req = http.get(`${backendUrl}/api/health`, (res) => {
         if (res.statusCode === 200) {
           resolve();
         } else if (attempts < retries) {
@@ -155,7 +182,7 @@ function createWindow() {
     mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
   } else {
-    mainWindow.loadURL(BACKEND_URL);
+    mainWindow.loadURL(backendUrl);
   }
 
   mainWindow.on('closed', () => {
@@ -189,7 +216,7 @@ function stopBackend() {
 // ── App lifecycle ───────────────────────────────────────────────────────────
 
 app.on('ready', async () => {
-  startBackend();
+  await startBackend();
 
   try {
     if (!IS_DEV) {

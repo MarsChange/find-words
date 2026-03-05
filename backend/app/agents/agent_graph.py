@@ -4,19 +4,33 @@ import logging
 import operator
 from typing import Annotated, TypedDict
 
-import opencc
-from openai import OpenAI
-from openai.types.chat import ChatCompletionMessageParam
-from langgraph.graph import END, StateGraph
-
 from app.core.database import search_content, get_messages_by_session, get_setting
-from app.services.cbeta_scraper import search_cbeta
 
 logger = logging.getLogger(__name__)
 
-# Shared OpenCC converter: Simplified -> Traditional
-_s2t = opencc.OpenCC("s2t")
-_t2s = opencc.OpenCC("t2s")
+
+# ── Lazy-loaded heavy dependencies ──────────────────────────────────────────
+# opencc, openai, langgraph, and cbeta_scraper are imported only when first
+# needed, shaving several seconds off server startup time.
+
+_s2t = None
+_t2s = None
+
+
+def _get_s2t():
+    global _s2t
+    if _s2t is None:
+        import opencc
+        _s2t = opencc.OpenCC("s2t")
+    return _s2t
+
+
+def _get_t2s():
+    global _t2s
+    if _t2s is None:
+        import opencc
+        _t2s = opencc.OpenCC("t2s")
+    return _t2s
 
 
 # ── State definition ─────────────────────────────────────────────────────────
@@ -43,7 +57,7 @@ class AgentState(_AgentStateRequired, total=False):
 def query_processor(state: AgentState) -> dict:
     """Convert the query from simplified to traditional Chinese."""
     original = state["original_query"]
-    traditional = _s2t.convert(original)
+    traditional = _get_s2t().convert(original)
     logger.info("Query: %s -> %s", original, traditional)
     return {"traditional_query": traditional}
 
@@ -74,6 +88,8 @@ def cbeta_scraper_node(state: AgentState) -> dict:
     """Optionally scrape CBETA online for additional results."""
     if not state.get("use_cbeta", False):
         return {"cbeta_hits": []}
+
+    from app.services.cbeta_scraper import search_cbeta
 
     query = state.get("traditional_query", state["original_query"])
     try:
@@ -123,7 +139,7 @@ def synthesizer(state: AgentState) -> dict:
                 f"- [{h.get('source')}] {h.get('filename', '')}: {h.get('snippet', '')}"
                 for h in all_hits[:20]
             )
-            messages: list[ChatCompletionMessageParam] = [
+            messages: list = [
                 {"role": "system", "content": (
                     "你是一位汉语言古籍研究助手。目前用户检索相应的词语文语料，得到了以下检索结果，"
                     f"检索词：{state.get('traditional_query', '')}\n"
@@ -177,7 +193,7 @@ def synthesizer_streaming(state: AgentState, on_chunk=None):
                 f"- [{h.get('source')}] {h.get('filename', '')}: {h.get('snippet', '')}"
                 for h in all_hits[:20]
             )
-            messages: list[ChatCompletionMessageParam] = [
+            messages: list = [
                 {"role": "system", "content": (
                     "你是一位汉语言古籍研究助手。目前用户检索相应的词语文语料，得到了以下检索结果，"
                     f"检索词：{state.get('traditional_query', '')}\n"
@@ -231,7 +247,7 @@ def chat_agent(state: AgentState) -> dict:
             )
     try:
         client = _get_client()
-        messages: list[ChatCompletionMessageParam] = [
+        messages: list = [
             {"role": "system", "content": (
                     "你是一位汉语言古籍研究助手。目前用户检索相应的词语文语料，得到了以下检索结果，"
                     f"检索词：{state.get('traditional_query', '')}\n"
@@ -259,13 +275,14 @@ def chat_agent(state: AgentState) -> dict:
 
 # ── Helper ───────────────────────────────────────────────────────────────────
 
-def _get_client() -> OpenAI:
+def _get_client():
     """Create an OpenAI-compatible client from current settings.
 
     All supported providers (DeepSeek, Qwen, Kimi, MiniMax) expose
     OpenAI-compatible endpoints, so we use the openai SDK for all of them.
     """
     import app.config as cfg
+    from openai import OpenAI
 
     current = cfg.settings
     if not current.llm_provider_api_key:
@@ -288,6 +305,8 @@ def _thinking_kwargs() -> dict:
 
 def build_search_graph():
     """Build and compile the search workflow graph."""
+    from langgraph.graph import END, StateGraph
+
     graph = StateGraph(AgentState)
 
     graph.add_node("query_processor", query_processor)
@@ -307,6 +326,8 @@ def build_search_graph():
 
 def build_chat_graph():
     """Build and compile the chat workflow graph."""
+    from langgraph.graph import END, StateGraph
+
     graph = StateGraph(AgentState)
 
     graph.add_node("chat_agent", chat_agent)
@@ -317,9 +338,23 @@ def build_chat_graph():
     return graph.compile()
 
 
-# Pre-compiled graphs (lazily used)
-search_graph = build_search_graph()
-chat_graph = build_chat_graph()
+# Lazily compiled graphs (built on first use)
+_search_graph = None
+_chat_graph = None
+
+
+def _get_search_graph():
+    global _search_graph
+    if _search_graph is None:
+        _search_graph = build_search_graph()
+    return _search_graph
+
+
+def _get_chat_graph():
+    global _chat_graph
+    if _chat_graph is None:
+        _chat_graph = build_chat_graph()
+    return _chat_graph
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
@@ -335,7 +370,7 @@ def run_search(query: str, use_cbeta: bool = False) -> dict:
         "all_hits": [],
         "synthesis": "",
     }
-    result = search_graph.invoke(state)
+    result = _get_search_graph().invoke(state)
     return result
 
 
@@ -359,7 +394,7 @@ def run_chat(message: str, history: list[dict],
         "chat_history": full_history,
         "chat_reply": "",
     }
-    result = chat_graph.invoke(state)
+    result = _get_chat_graph().invoke(state)
     return result.get("chat_reply", "")
 
 
@@ -463,7 +498,7 @@ def run_chat_streaming(message: str, history: list[dict],
     
     try:
         client = _get_client()
-        messages: list[ChatCompletionMessageParam] = [
+        messages: list = [
             {"role": "system", "content": system_content}
         ]
         for msg in history:

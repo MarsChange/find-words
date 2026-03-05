@@ -15,8 +15,8 @@ files:
   - "!tsconfig.json"
 
 extraResources:
-  # Bundled Python backend executable
-  - from: ../backend/dist/
+  # Bundled Python backend (one-dir mode: executable + _internal/)
+  - from: ../backend/dist/findwords-server/
     to: backend
     filter:
       - "**/*"

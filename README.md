@@ -24,10 +24,11 @@ FindWords/
 │   │   ├── core/             # 数据库、WebSocket 管理
 │   │   ├── models/           # Pydantic 数据模型
 │   │   └── services/         # PDF 处理、CBETA 爬虫
+│   ├── hooks/                # PyInstaller 运行时钩子
 │   ├── data/                 # 开发模式数据目录
 │   ├── requirements.txt
 │   ├── run_server.py         # PyInstaller 入口
-│   └── findwords-server.spec # PyInstaller 打包配置
+│   └── findwords-server.spec # PyInstaller 打包配置 (one-dir 模式)
 ├── frontend/                 # React + Electron 前端
 │   ├── electron/
 │   │   ├── main.cjs          # Electron 主进程
@@ -36,7 +37,9 @@ FindWords/
 │   ├── electron-builder.yml  # electron-builder 打包配置
 │   ├── package.json
 │   └── vite.config.ts
+├── build.sh                  # macOS/Linux 一键构建脚本
 ├── build-win.bat             # Windows 一键构建脚本
+├── package.json              # 根目录便捷脚本
 └── README.md
 ```
 
@@ -157,7 +160,9 @@ pip install pyinstaller
 pyinstaller findwords-server.spec --clean -y
 ```
 
-输出到 `backend/dist/findwords-server`（macOS/Linux）或 `backend/dist/findwords-server.exe`（Windows）。
+输出到 `backend/dist/findwords-server/` **目录**（one-dir 模式），包含可执行文件 `findwords-server` 和 `_internal/` 依赖目录。
+
+> **为什么使用 one-dir 模式？** 相比 one-file 模式（将所有文件打包成单个可执行文件），one-dir 模式避免了每次启动时解压 ~127MB 临时文件的开销，启动时间从 **~45 秒降至 ~1 秒**。
 
 #### 第三步：生成安装包
 
@@ -177,16 +182,20 @@ npm run dist:linux    # Linux → .AppImage + .deb
 
 #### 一键构建（当前平台）
 
+**macOS / Linux：**
+
 ```bash
+# 方式一：使用根目录构建脚本（自动创建 venv、安装依赖）
+./build.sh
+
+# 方式二：使用 npm 脚本（需已安装依赖）
 cd frontend
 npm run build:all
 ```
 
-等价于依次执行：前端 build → 后端 PyInstaller → electron-builder。
+两者等价于依次执行：安装依赖 → 构建前端 → PyInstaller 打包后端 → electron-builder 生成安装包。
 
-### Windows 一键构建
-
-在 Windows 机器上，直接运行项目根目录的批处理脚本：
+**Windows：**
 
 ```cmd
 build-win.bat
@@ -207,9 +216,21 @@ files:              # Electron 主进程文件
   - package.json
 
 extraResources:     # 附加资源（安装后释放到 resources/ 目录）
-  - from: ../backend/dist/   → backend/        # 后端可执行文件
-  - from: dist/              → frontend-dist/  # 前端静态文件
+  - from: ../backend/dist/findwords-server/   # 后端 one-dir 整个目录
+    to: backend
+  - from: dist/                               # 前端静态文件
+    to: frontend-dist
 ```
+
+> `extraResources` 中 `from` 指向 PyInstaller one-dir 输出目录 `backend/dist/findwords-server/`，安装后释放到应用 `resources/backend/` 下，Electron 主进程在此路径启动后端进程。
+
+**各平台输出格式：**
+
+| 平台 | 输出格式 | 输出目录 |
+|------|---------|----------|
+| macOS | `.dmg` + `.zip` | `frontend/release/` |
+| Windows | NSIS 安装包 + Portable | `frontend/release/` |
+| Linux | `.AppImage` + `.deb` | `frontend/release/` |
 
 **NSIS 安装包选项（Windows）：**
 - 支持自定义安装目录

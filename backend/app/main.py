@@ -10,18 +10,40 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from app.config import settings
-from app.core.database import init_db
+from app.core.database import init_db, recover_stuck_files
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize the database on startup."""
+    """Initialize the database on startup and recover stuck files."""
     init_db()
+
+    # Recover files stuck at 'processing' from a previous crash / failed OCR
+    stuck_files = recover_stuck_files()
+    if stuck_files:
+        from app.services.pdf_processor import process_pdf_background
+        for f in stuck_files:
+            fpath = f["filepath"]
+            if Path(fpath).exists():
+                logger.info(
+                    "Re-processing stuck file: id=%d, %s", f["id"], f["filename"]
+                )
+                process_pdf_background(f["id"], fpath)
+            else:
+                logger.warning(
+                    "Stuck file missing on disk, marking as error: id=%d, %s",
+                    f["id"], f["filename"],
+                )
+                from app.core.database import update_file_status
+                update_file_status(f["id"], "error")
+
     yield
 
 
@@ -32,15 +54,10 @@ app = FastAPI(
     redoc_url="/api/redoc" if settings.debug else None,
 )
 
-# CORS - allow frontend dev server and Electron app
+# CORS - allow frontend dev server and Electron app (any localhost port)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-    ],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Content-Type", "Authorization"],

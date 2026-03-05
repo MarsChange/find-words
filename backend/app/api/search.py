@@ -37,6 +37,7 @@ async def search(req: SearchRequest) -> SearchResponse:
             snippet=h.get("snippet", ""),
             snippets=h.get("snippets", []),
             dynasty=h.get("dynasty", ""),
+            category=h.get("category", ""),
             author=h.get("author", ""),
             sutra_id=h.get("sutra_id"),
             title=h.get("title"),

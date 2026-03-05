@@ -1,12 +1,13 @@
 import axios from 'axios';
 
-// In Electron production mode, backend runs at http://localhost:8000
-// In dev mode, Vite proxies /api to localhost:8000
-const BASE_URL = window.location.port === '5173' ? '/api' : 'http://localhost:8000/api';
+// Always use relative '/api' path:
+// - Dev mode: Vite proxy forwards /api → localhost:8000
+// - Production (Electron): frontend is served by the same FastAPI server, so /api is same-origin
+const BASE_URL = '/api';
 
 const api = axios.create({
   baseURL: BASE_URL,
-  timeout: 30000,
+  timeout: 300_000, // 5 min — large PDFs may take time to upload
   headers: {
     'Content-Type': 'application/json',
   },

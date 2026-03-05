@@ -1,13 +1,36 @@
+# === IDE / Editor ===
 .claude
 .vscode
-__pycache__
-backend/*/__pycache__
-backend/data
-backend/dist
-backend/build
-backend/venv
+
+# === OS ===
+.DS_Store
+Thumbs.db
+
+# === Python 编译文件 ===
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+
+# === 后端 (Python / PyInstaller) ===
+backend/data/
+backend/.packenv/
+backend/venv/
+backend/dist/
+backend/build/
 backend/*.spec.bak
-frontend/node_modules
-frontend/dist
-node_modules
-release
+
+# === 前端 (Node / Vite / Electron) ===
+frontend/node_modules/
+frontend/dist/
+frontend/release/
+tsconfig.tsbuildinfo
+
+# === 根目录 ===
+node_modules/
+
+# === electron-builder 产物 / 调试文件 ===
+release/
+builder-debug.yml
+builder-effective-config.yaml

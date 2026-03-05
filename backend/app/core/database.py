@@ -163,6 +163,30 @@ def init_db() -> None:
             pass  # Column already exists
 
 
+def recover_stuck_files() -> list[dict]:
+    """Reset files stuck at 'processing' (from previous crash) back to 'pending'.
+
+    Returns the list of recovered file records so the caller can re-trigger
+    background processing for them.
+    """
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM files WHERE status = 'processing'"
+        ).fetchall()
+        if rows:
+            conn.execute(
+                "UPDATE files SET status = 'pending', page_count = 0 "
+                "WHERE status = 'processing'"
+            )
+            # Also clear any partial FTS content for these files
+            for row in rows:
+                conn.execute(
+                    "DELETE FROM content_fts WHERE file_id = ?",
+                    (str(row["id"]),),
+                )
+        return [dict(r) for r in rows]
+
+
 # ── File CRUD ────────────────────────────────────────────────────────────────
 
 def insert_file(filename: str, filepath: str, dynasty: str = "",

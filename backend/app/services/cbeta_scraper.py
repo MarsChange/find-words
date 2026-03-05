@@ -2,22 +2,23 @@
 
 Automatically detects the user's default browser and uses the
 corresponding WebDriver (Chrome, Firefox, Edge, or Safari).
+
+Selenium is imported lazily (on first use) to avoid slowing down server
+startup — the import alone takes 1-2 seconds and is only needed when the
+user actually triggers a CBETA search.
 """
 
 import logging
+import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
+import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from urllib.parse import quote
-
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException
 
 from app.config import settings
 
@@ -39,6 +40,40 @@ _BROWSER_PATTERNS: dict[str, list[str]] = {
     "edge":    ["edge", "microsoft edge", "msedge"],
     "safari":  ["safari"],
 }
+
+# Lazy-loaded selenium references (set by _ensure_selenium())
+_selenium_loaded = False
+
+
+def _ensure_selenium():
+    """Lazily import selenium and ensure selenium-manager is executable."""
+    global _selenium_loaded
+    if _selenium_loaded:
+        return
+    _selenium_loaded = True
+
+    # In PyInstaller bundles, ensure the selenium-manager binary is executable
+    if getattr(sys, 'frozen', False):
+        meipass = getattr(sys, '_MEIPASS', '')
+        if meipass:
+            system = platform.system()
+            if system == "Darwin":
+                mgr_path = os.path.join(meipass, 'selenium', 'webdriver', 'common', 'macos', 'selenium-manager')
+            elif system == "Linux":
+                mgr_path = os.path.join(meipass, 'selenium', 'webdriver', 'common', 'linux', 'selenium-manager')
+            elif system == "Windows":
+                mgr_path = os.path.join(meipass, 'selenium', 'webdriver', 'common', 'windows', 'selenium-manager.exe')
+            else:
+                mgr_path = None
+
+            if mgr_path and os.path.isfile(mgr_path):
+                st = os.stat(mgr_path)
+                if not (st.st_mode & stat.S_IXUSR):
+                    os.chmod(mgr_path, st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                    logger.debug("Set execute permission on selenium-manager: %s", mgr_path)
+                logger.debug("selenium-manager found at: %s", mgr_path)
+            elif mgr_path:
+                logger.warning("selenium-manager not found in bundle at: %s", mgr_path)
 
 
 @dataclass
@@ -195,7 +230,8 @@ _HEADLESS_ARGS = [
 ]
 
 
-def _create_chrome_driver(headless: bool) -> webdriver.Chrome:
+def _create_chrome_driver(headless: bool):
+    from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
     from selenium.webdriver.chrome.service import Service
     opts = Options()
@@ -209,7 +245,8 @@ def _create_chrome_driver(headless: bool) -> webdriver.Chrome:
     return webdriver.Chrome(service=Service(**svc_kwargs), options=opts)
 
 
-def _create_firefox_driver(headless: bool) -> webdriver.Firefox:
+def _create_firefox_driver(headless: bool):
+    from selenium import webdriver
     from selenium.webdriver.firefox.options import Options
     from selenium.webdriver.firefox.service import Service
     opts = Options()
@@ -219,7 +256,8 @@ def _create_firefox_driver(headless: bool) -> webdriver.Firefox:
     return webdriver.Firefox(service=Service(), options=opts)
 
 
-def _create_edge_driver(headless: bool) -> webdriver.Edge:
+def _create_edge_driver(headless: bool):
+    from selenium import webdriver
     from selenium.webdriver.edge.options import Options
     from selenium.webdriver.edge.service import Service
     opts = Options()
@@ -230,7 +268,8 @@ def _create_edge_driver(headless: bool) -> webdriver.Edge:
     return webdriver.Edge(service=Service(), options=opts)
 
 
-def _create_safari_driver(headless: bool) -> webdriver.Safari:
+def _create_safari_driver(headless: bool):
+    from selenium import webdriver
     # Safari doesn't support headless mode natively
     from selenium.webdriver.safari.service import Service
     return webdriver.Safari(service=Service())
@@ -244,8 +283,12 @@ _DRIVER_FACTORIES = {
 }
 
 
-def _create_driver() -> webdriver.Remote:
+def _create_driver():
     """Create a headless WebDriver using the user's default browser."""
+    from selenium.common.exceptions import WebDriverException
+
+    _ensure_selenium()
+
     headless = settings.headless
     browser = detect_default_browser()
 
@@ -261,11 +304,12 @@ def _create_driver() -> webdriver.Remote:
         if not factory:
             continue
         try:
+            logger.info("Attempting to create %s WebDriver (headless=%s)...", name, headless)
             driver = factory(headless)
-            logger.info("Using %s WebDriver", name)
+            logger.info("Successfully created %s WebDriver", name)
             return driver
         except Exception as e:
-            logger.debug("Failed to create %s driver: %s", name, e)
+            logger.warning("Failed to create %s driver: %s", name, e)
             last_error = e
             continue
 
@@ -309,6 +353,11 @@ def search_cbeta(query: str, max_results: int = 20) -> list[CBETAResult]:
     Returns:
         List of CBETAResult with title, sutra_id, snippet, dynasty, and author.
     """
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.common.exceptions import TimeoutException, WebDriverException
+
     driver = None
     results: list[CBETAResult] = []
     try:

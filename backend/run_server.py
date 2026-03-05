@@ -14,6 +14,8 @@ else:
 sys.path.insert(0, _bundle_dir)
 
 import uvicorn
+# Direct import so PyInstaller can trace the dependency tree
+from app.main import app as application
 
 
 def main():
@@ -21,7 +23,7 @@ def main():
     port = int(os.environ.get("FINDWORDS_PORT", "8000"))
 
     uvicorn.run(
-        "app.main:app",
+        application,
         host=host,
         port=port,
         log_level="info",

@@ -143,6 +143,7 @@ class SearchResultResponse(BaseModel):
     snippet: str = ""
     snippets: list[str] = []
     dynasty: str = ""
+    category: str = ""
     author: str = ""
     sutra_id: Optional[str] = None
     title: Optional[str] = None

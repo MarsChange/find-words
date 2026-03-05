@@ -23,7 +23,7 @@ echo [3/4] 构建后端可执行文件...
 cd /d "%~dp0backend"
 pip install -r requirements.txt
 pip install pyinstaller
-pyinstaller --clean --noconfirm findwords-server.spec
+pyinstaller findwords-server.spec --clean -y
 if errorlevel 1 (
     echo 后端构建失败
     exit /b 1
