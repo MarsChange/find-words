@@ -5,6 +5,9 @@ import sys
 from PyInstaller.utils.hooks import collect_data_files
 
 block_cipher = None
+IS_WINDOWS = sys.platform.startswith('win')
+USE_STRIP = not IS_WINDOWS
+USE_UPX = not IS_WINDOWS
 
 # Collect data files for packages that need them
 opencc_datas = collect_data_files('opencc')
@@ -116,9 +119,30 @@ a = Analysis(
         'notebook',
         'tensorflow',
         'torch',
+        'torchvision',
+        'tokenizers',
         'sklearn',
         'pytest',
         'setuptools.tests',
+        # Extra heavy packages that may exist in a conda dev env but are not
+        # needed by FindWords runtime. Excluding them avoids accidental bundle bloat.
+        'playwright',
+        'ray',
+        'transformers',
+        'pyarrow',
+        'llvmlite',
+        'numba',
+        'spacy',
+        'lightgbm',
+        'statsmodels',
+        'plotly',
+        'faiss',
+        'h5py',
+        'skimage',
+        'jieba',
+        'pdfminer',
+        'pikepdf',
+        'grpc',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -140,8 +164,8 @@ exe = EXE(
     name='findwords-server',
     debug=False,
     bootloader_ignore_signals=False,
-    strip=True,
-    upx=True,
+    strip=USE_STRIP,
+    upx=USE_UPX,
     console=True,
 )
 
@@ -150,7 +174,7 @@ coll = COLLECT(
     a.binaries,
     a.zipfiles,
     a.datas,
-    strip=True,
-    upx=True,
+    strip=USE_STRIP,
+    upx=USE_UPX,
     name='findwords-server',
 )

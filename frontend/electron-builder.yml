@@ -2,6 +2,9 @@ appId: com.findwords.app
 productName: FindWords
 copyright: Copyright © 2026 Chen Shengfeng
 
+electronDownload:
+  mirror: https://npmmirror.com/mirrors/electron/
+
 directories:
   output: release
 
@@ -35,6 +38,7 @@ mac:
 
 win:
   icon: electron/icons/icon.ico
+  signAndEditExecutable: false
   target:
     - nsis
     - portable
