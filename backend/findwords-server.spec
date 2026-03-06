@@ -11,15 +11,15 @@ USE_UPX = not IS_WINDOWS
 
 # Collect data files for packages that need them
 opencc_datas = collect_data_files('opencc')
-rapidocr_datas = collect_data_files('rapidocr_onnxruntime')
-onnxruntime_datas = collect_data_files('onnxruntime')
+paddleocr_datas = collect_data_files('paddleocr')
+paddle_datas = collect_data_files('paddle', include_py_files=True)
 selenium_datas = collect_data_files('selenium')
 
 a = Analysis(
     ['run_server.py'],
     pathex=['.'],
     binaries=[],
-    datas=opencc_datas + rapidocr_datas + onnxruntime_datas + selenium_datas,
+    datas=opencc_datas + paddleocr_datas + paddle_datas + selenium_datas,
     hiddenimports=[
         # --- uvicorn ---
         'uvicorn',
@@ -62,18 +62,17 @@ a = Analysis(
         'opencc',
         'fitz',
         'pymupdf',
-        # --- OCR (try/except import in pdf_processor.py) ---
-        'rapidocr_onnxruntime',
-        'rapidocr_onnxruntime.ch_ppocr_v3_det',
-        'rapidocr_onnxruntime.ch_ppocr_v3_det.text_detect',
-        'rapidocr_onnxruntime.ch_ppocr_v2_cls',
-        'rapidocr_onnxruntime.ch_ppocr_v2_cls.text_cls',
-        'rapidocr_onnxruntime.ch_ppocr_v3_rec',
-        'rapidocr_onnxruntime.ch_ppocr_v3_rec.text_recognize',
-        'onnxruntime',
-        'onnxruntime.capi',
-        'onnxruntime.capi._pybind_state',
-        'onnxruntime.capi._ld_preload',
+        # --- OCR (PaddleOCR) ---
+        'paddleocr',
+        'paddle',
+        'paddle.utils',
+        'paddle.dataset',
+        'paddle.reader',
+        'paddle.fluid',
+        'shapely',
+        'pyclipper',
+        'imgaug',
+        'lmdb',
         # --- selenium browser drivers (deferred imports in cbeta_scraper.py) ---
         'selenium',
         'selenium.webdriver',
@@ -108,8 +107,9 @@ a = Analysis(
     ],
     hookspath=['hooks'],
     hooksconfig={},
-    runtime_hooks=['hooks/rthook_cv2.py', 'hooks/rthook_rapidocr.py'],
+    runtime_hooks=['hooks/rthook_cv2.py'],
     excludes=[
+        # --- ML frameworks not used ---
         'nltk',
         'scipy',
         'pandas',
@@ -124,9 +124,8 @@ a = Analysis(
         'sklearn',
         'pytest',
         'setuptools.tests',
-        # Extra heavy packages that may exist in a conda dev env but are not
-        # needed by FindWords runtime. Excluding them avoids accidental bundle bloat.
-        'playwright',
+        'huggingface_hub',
+        'e2b',
         'ray',
         'transformers',
         'pyarrow',
@@ -143,6 +142,50 @@ a = Analysis(
         'pdfminer',
         'pikepdf',
         'grpc',
+        'rapidocr_onnxruntime',
+        'onnxruntime',
+        # --- browser / automation (playwright not needed) ---
+        'playwright',
+        # --- cloud SDKs ---
+        'botocore',
+        'boto3',
+        's3transfer',
+        # --- crypto / encoding not needed ---
+        'cryptography',
+        'Crypto',
+        'pycryptodome',
+        # --- data / NLP tools not needed ---
+        'lxml',
+        'rapidfuzz',
+        'pypdfium2',
+        'onnx',
+        'emoji',
+        'Cython',
+        'timm',
+        'tiktoken',
+        'pi_heif',
+        'langdetect',
+        # --- GUI / Tk not needed ---
+        'tkinter',
+        '_tkinter',
+        'tcl',
+        'tcl8',
+        # --- telemetry / monitoring ---
+        'opentelemetry',
+        'sentry_sdk',
+        # --- misc not needed ---
+        'datasets',
+        'altair',
+        'pyecharts',
+        'pycocotools',
+        'flask',
+        'werkzeug',
+        'lightning',
+        'fvcore',
+        'redis',
+        'pymilvus',
+        'mcp',
+        'ollama',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

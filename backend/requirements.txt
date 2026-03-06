@@ -11,5 +11,5 @@ python-multipart
 aiofiles
 websockets
 httpx
-rapidocr_onnxruntime
-opencv-python-headless
+paddlepaddle
+paddleocr>=2.7,<3

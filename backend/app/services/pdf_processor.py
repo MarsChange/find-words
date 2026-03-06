@@ -1,9 +1,9 @@
-"""PDF processing service using PyMuPDF (fitz) with parallel RapidOCR."""
+"""PDF processing service using PyMuPDF (fitz) with PaddleOCR."""
 
 import logging
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
 import sys
@@ -20,21 +20,14 @@ logger = logging.getLogger(__name__)
 # Batch size for FTS5 inserts
 _DB_BATCH_SIZE = 50
 
-# Number of parallel OCR workers (auto-detect based on CPU cores)
-_OCR_WORKERS = min(os.cpu_count() or 4, 10)
-
-# Lazy-loaded RapidOCR instance (heavy to initialize)
+# Lazy-loaded PaddleOCR instance
 _ocr_engine = None
 _ocr_lock = threading.Lock()
-_ocr_init_failed = False  # Flag to avoid retrying after failure
+_ocr_init_failed = False
 
 
 def _get_ocr():
-    """Get or create the RapidOCR engine (thread-safe singleton).
-
-    Uses a timeout to prevent hanging when ONNX model files are missing
-    or not loadable (common in PyInstaller bundles).
-    """
+    """Get or create the PaddleOCR engine (thread-safe singleton)."""
     global _ocr_engine, _ocr_init_failed
     if _ocr_engine is not None:
         return _ocr_engine
@@ -46,35 +39,27 @@ def _get_ocr():
         if _ocr_init_failed:
             return None
 
-        # In PyInstaller bundles, rapidocr_onnxruntime resolves model paths
-        # via Path(__file__).parent and uses importlib.import_module() with
-        # bare module names.  Ensure sys.path includes the package directory.
-        if getattr(sys, 'frozen', False):
-            import importlib
-            _meipass = getattr(sys, '_MEIPASS', '')
-            _rpkg = os.path.join(_meipass, 'rapidocr_onnxruntime')
-            if os.path.isdir(_rpkg) and _rpkg not in sys.path:
-                sys.path.insert(0, _rpkg)
-                logger.debug("Added %s to sys.path for OCR sub-modules", _rpkg)
-
-        # Try to initialize in a thread with timeout to avoid hanging
         result = [None]
         error = [None]
 
         def _init():
             try:
-                from rapidocr_onnxruntime import RapidOCR
-                result[0] = RapidOCR()
+                from paddleocr import PaddleOCR
+                result[0] = PaddleOCR(
+                    use_angle_cls=True,
+                    lang="chinese_cht",
+                    show_log=False,
+                )
             except Exception as e:
                 error[0] = e
 
         init_thread = threading.Thread(target=_init, daemon=True)
         init_thread.start()
-        init_thread.join(timeout=60)  # 60 second timeout (first load is slow)
+        init_thread.join(timeout=120)
 
         if init_thread.is_alive():
             logger.warning(
-                "RapidOCR initialization timed out (>60s). "
+                "PaddleOCR initialization timed out (>120s). "
                 "OCR is disabled. Scanned PDFs will not be indexed."
             )
             _ocr_init_failed = True
@@ -82,7 +67,7 @@ def _get_ocr():
 
         if error[0] is not None:
             logger.warning(
-                "RapidOCR initialization failed: %s. "
+                "PaddleOCR initialization failed: %s. "
                 "Scanned PDFs will not be indexed.",
                 error[0],
             )
@@ -91,33 +76,40 @@ def _get_ocr():
 
         if result[0] is not None:
             _ocr_engine = result[0]
-            logger.info("RapidOCR engine initialized")
+            logger.info("PaddleOCR engine initialized (chinese_cht)")
             return _ocr_engine
 
-        logger.warning("RapidOCR initialization returned None")
+        logger.warning("PaddleOCR initialization returned None")
         _ocr_init_failed = True
         return None
 
 
-def _render_and_ocr(raw: bytes, page_idx: int) -> tuple[int, str]:
-    """Render a single page and run OCR. Thread-safe (opens own document)."""
-    with fitz.open(stream=raw, filetype="pdf") as doc:
-        page = doc[page_idx]
-        pix = page.get_pixmap(dpi=300)
-        img_bytes = pix.tobytes("png")
+# Each worker process holds its own PaddleOCR instance
+_worker_ocr = None
 
-    # OCR outside the fitz context to free page/pixmap memory early
-    ocr = _get_ocr()
-    if ocr is None:
-        return (page_idx + 1, "")
+
+def _init_worker():
+    """Initialize PaddleOCR once per worker process."""
+    global _worker_ocr
+    from paddleocr import PaddleOCR
+    _worker_ocr = PaddleOCR(use_angle_cls=True, lang="chinese_cht", show_log=False)
+
+
+def _render_and_ocr_worker(args: tuple) -> tuple[int, str]:
+    """Render a page then OCR it. Runs in a worker process."""
+    raw, page_idx = args
     try:
-        result, _ = ocr(img_bytes)
-        if not result:
+        with fitz.open(stream=raw, filetype="pdf") as doc:
+            page = doc[page_idx]
+            pix = page.get_pixmap(dpi=300)
+            img_bytes = pix.tobytes("png")
+
+        result = _worker_ocr.ocr(img_bytes)
+        if not result or not result[0]:
             return (page_idx + 1, "")
-        lines = [text for _, text, score in result if float(score) > 0.5]
+        lines = [line[1][0] for line in result[0]]
         return (page_idx + 1, "\n".join(lines))
     except Exception:
-        logger.debug("OCR failed for page %d", page_idx + 1, exc_info=True)
         return (page_idx + 1, "")
 
 
@@ -166,27 +158,36 @@ def extract_text_from_pdf(
     if progress_callback:
         progress_callback(text_count, total_pages)
 
-    # ── Parallel render + OCR (each worker opens its own doc) ──────────
-    if ocr_page_indices and _get_ocr() is not None:
+    # ── Parallel render + OCR via process pool ──────────────────────
+    # PaddleOCR is not thread-safe, so we use separate processes.
+    # Each worker process has its own PaddleOCR instance.
+    if ocr_page_indices:
+        num_workers = min(os.cpu_count() or 4, 8)
         logger.info(
-            "Parallel render+OCR: %d pages, %d workers",
-            len(ocr_page_indices), _OCR_WORKERS,
+            "Parallel render+OCR: %d pages, %d worker processes",
+            len(ocr_page_indices), num_workers,
         )
 
         completed = 0
-        with ThreadPoolExecutor(max_workers=_OCR_WORKERS) as pool:
-            future_to_page = {
-                pool.submit(_render_and_ocr, raw, idx): idx
-                for idx in ocr_page_indices
+        with ProcessPoolExecutor(
+            max_workers=num_workers, initializer=_init_worker
+        ) as pool:
+            tasks = [(raw, idx) for idx in ocr_page_indices]
+            future_to_idx = {
+                pool.submit(_render_and_ocr_worker, task): task[1]
+                for task in tasks
             }
-            for future in as_completed(future_to_page):
+            for future in as_completed(future_to_idx):
                 try:
                     page_num, text = future.result()
                     if text:
                         text_pages.append((page_num, text))
                 except Exception:
-                    page_idx = future_to_page[future]
-                    logger.debug("Render+OCR failed for page %d", page_idx + 1, exc_info=True)
+                    page_idx = future_to_idx[future]
+                    logger.debug(
+                        "Render+OCR failed for page %d",
+                        page_idx + 1, exc_info=True,
+                    )
 
                 completed += 1
                 if progress_callback:

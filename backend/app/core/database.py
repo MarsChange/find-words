@@ -323,23 +323,52 @@ def _sanitize_fts5_query(raw: str) -> str:
     return f'"{escaped}"'
 
 
-def search_content(query: str, limit: int = 100) -> list[dict]:
+def _extract_snippets(content: str, keyword: str, ctx: int = 40) -> list[str]:
+    """Extract all occurrences of *keyword* from *content* with context.
+
+    *content* is the raw CJK-tokenized text stored in FTS5.  We first
+    collapse the tokenization spaces so the search works on natural text,
+    then create one snippet per occurrence with *ctx* characters of
+    surrounding context.
+    """
+    clean = _CJK_SPACE_RE.sub("", content)
+    target = _CJK_SPACE_RE.sub("", keyword)
+    if not target:
+        return []
+    snippets: list[str] = []
+    start = 0
+    while True:
+        idx = clean.find(target, start)
+        if idx == -1:
+            break
+        lo = max(0, idx - ctx)
+        hi = min(len(clean), idx + len(target) + ctx)
+        prefix = "…" if lo > 0 else ""
+        suffix = "…" if hi < len(clean) else ""
+        snippets.append(prefix + clean[lo:hi] + suffix)
+        start = idx + 1  # advance past this occurrence
+    return snippets
+
+
+def search_content(query: str, limit: int = 200) -> list[dict]:
     """
     Run an FTS5 MATCH query and return results with contextual snippets.
 
     The query is sanitized to prevent FTS5 syntax injection.
 
-    Each result dict contains: file_id, page_num, snippet, filename,
-    dynasty, author.
+    Each result dict contains: file_id, page_num, snippet, snippets,
+    filename, dynasty, category, author.
     """
     safe_query = _sanitize_fts5_query(query)
-    ctx = settings.snippet_context_chars
+    # Strip FTS5 special chars to get the raw keyword for in-text search
+    raw_keyword = _FTS5_SPECIAL.sub(" ", query).strip()
     with get_db() as conn:
         rows = conn.execute(
             """
             SELECT
                 c.file_id,
                 c.page_num,
+                c.content,
                 snippet(content_fts, 2, '【', '】', '…', 30) AS snippet,
                 f.filename,
                 f.dynasty,
@@ -356,7 +385,10 @@ def search_content(query: str, limit: int = 100) -> list[dict]:
         results = []
         for r in rows:
             d = dict(r)
+            content = d.pop("content", "")
             d["snippet"] = _clean_snippet(d.get("snippet", ""))
+            # Extract all keyword occurrences within the page
+            d["snippets"] = _extract_snippets(content, raw_keyword) or [d["snippet"]]
             results.append(d)
         return results
 
