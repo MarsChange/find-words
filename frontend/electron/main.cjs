@@ -13,6 +13,17 @@ let backendPort = DEFAULT_BACKEND_PORT;
 let backendUrl = `http://localhost:${backendPort}`;
 const IS_DEV = !app.isPackaged;
 
+function writeStartupLog(message) {
+  const line = `${new Date().toISOString()} ${message}\n`;
+  console.log(line.trim());
+  try {
+    const logPath = path.join(app.getPath('userData'), 'startup.log');
+    fs.appendFileSync(logPath, line, 'utf8');
+  } catch (_err) {
+    // Ignore disk write failures for startup logging.
+  }
+}
+
 function isPortAvailable(port) {
   return new Promise((resolve) => {
     const server = net.createServer();
@@ -56,6 +67,14 @@ function getBackendPath() {
   return null;
 }
 
+function getBackendCandidatePaths() {
+  const exeName = process.platform === 'win32' ? 'findwords-server.exe' : 'findwords-server';
+  return [
+    path.join(process.resourcesPath, 'backend', exeName),
+    path.join(path.dirname(app.getPath('exe')), 'backend', exeName),
+  ];
+}
+
 /**
  * Get the user data directory for storing database, uploads, and config.
  */
@@ -84,9 +103,14 @@ function getFrontendDistPath() {
  */
 async function startBackend() {
   const backendPath = getBackendPath();
-  if (!backendPath) {
+  if (IS_DEV) {
     console.log('[Electron] Dev mode: skipping backend launch');
     return;
+  }
+
+  if (!backendPath) {
+    const candidates = getBackendCandidatePaths().join('\n');
+    throw new Error(`Bundled backend executable not found. Checked:\n${candidates}`);
   }
 
   backendPort = await findAvailablePort(DEFAULT_BACKEND_PORT, 20);
@@ -106,22 +130,51 @@ async function startBackend() {
   console.log(`[Electron] Starting backend: ${backendPath}`);
   console.log(`[Electron] Backend URL: ${backendUrl}`);
   console.log(`[Electron] Data directory: ${dataDir}`);
+  writeStartupLog(`[Electron] Starting backend: ${backendPath}`);
+  writeStartupLog(`[Electron] Backend URL: ${backendUrl}`);
+  writeStartupLog(`[Electron] Data directory: ${dataDir}`);
 
   backendProcess = spawn(backendPath, [], {
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
+  await new Promise((resolve, reject) => {
+    let settled = false;
+
+    backendProcess.once('spawn', () => {
+      settled = true;
+      resolve();
+    });
+
+    backendProcess.once('error', (err) => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`Failed to start backend process: ${err.message}`));
+    });
+
+    backendProcess.once('exit', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`Backend exited immediately (code=${code}, signal=${signal || 'none'})`));
+    });
+  });
+
   backendProcess.stdout.on('data', (data) => {
-    console.log(`[Backend] ${data.toString().trim()}`);
+    const msg = data.toString().trim();
+    console.log(`[Backend] ${msg}`);
+    if (msg) writeStartupLog(`[Backend][stdout] ${msg}`);
   });
 
   backendProcess.stderr.on('data', (data) => {
-    console.error(`[Backend] ${data.toString().trim()}`);
+    const msg = data.toString().trim();
+    console.error(`[Backend] ${msg}`);
+    if (msg) writeStartupLog(`[Backend][stderr] ${msg}`);
   });
 
-  backendProcess.on('exit', (code) => {
+  backendProcess.on('exit', (code, signal) => {
     console.log(`[Electron] Backend exited with code ${code}`);
+    writeStartupLog(`[Electron] Backend exited (code=${code}, signal=${signal || 'none'})`);
     backendProcess = null;
   });
 }
@@ -186,13 +239,21 @@ function createWindow() {
     },
   });
 
-  // In production, load from the backend server (which serves the frontend)
-  // In dev, load from the Vite dev server
+  // In production, show a startup page first, then switch to backend URL
+  // after health check succeeds.
   if (IS_DEV) {
     mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
   } else {
-    mainWindow.loadURL(backendUrl);
+    mainWindow.loadURL(
+      'data:text/html;charset=utf-8,' +
+      encodeURIComponent(
+        '<!doctype html><html><head><meta charset="utf-8"><title>FindWords</title></head>' +
+        '<body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh;font-family:Segoe UI,Arial,sans-serif;">' +
+        '<div><h3 style="margin:0 0 8px;">FindWords</h3><div>正在启动后端服务，请稍候...</div></div>' +
+        '</body></html>',
+      ),
+    );
   }
 
   mainWindow.on('closed', () => {
@@ -226,13 +287,20 @@ function stopBackend() {
 // ── App lifecycle ───────────────────────────────────────────────────────────
 
 app.on('ready', async () => {
-  await startBackend();
+  writeStartupLog(`[Electron] App ready (isPackaged=${app.isPackaged}, platform=${process.platform})`);
+  createWindow();
 
   try {
+    await startBackend();
+
     if (!IS_DEV) {
       await waitForBackend();
+      if (mainWindow) {
+        mainWindow.loadURL(backendUrl);
+      }
     }
   } catch (err) {
+    writeStartupLog(`[Electron] Startup failed: ${err.message}`);
     dialog.showErrorBox(
       '启动失败',
       '后端服务启动失败，请重试。\n\n' + err.message,
@@ -240,8 +308,6 @@ app.on('ready', async () => {
     app.quit();
     return;
   }
-
-  createWindow();
 });
 
 app.on('window-all-closed', () => {

@@ -6,6 +6,7 @@ import platform
 import time
 import threading
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from typing import Callable
 import sys
@@ -30,8 +31,7 @@ logger = logging.getLogger(__name__)
 # Batch size for FTS5 inserts
 _DB_BATCH_SIZE = 50
 
-# Windows uses sequential OCR (OneDNN crashes in spawned sub-processes).
-# macOS/Linux use ProcessPoolExecutor for parallel OCR.
+# Platform flag for runtime OCR strategy tweaks.
 _IS_WINDOWS = platform.system() == "Windows"
 
 
@@ -76,8 +76,16 @@ def _patch_paddle_inference():
     logger.info("Patched paddle.inference.create_predictor to disable OneDNN")
 
 
-# Apply the patch on Windows before any PaddleOCR model loading
-if _IS_WINDOWS:
+# Track whether the paddle inference patch has been applied
+_paddle_patched = False
+
+
+def _ensure_paddle_patched():
+    """Apply the OneDNN monkey-patch once, lazily (not at import time)."""
+    global _paddle_patched
+    if _paddle_patched or not _IS_WINDOWS:
+        return
+    _paddle_patched = True
     _patch_paddle_inference()
 
 
@@ -227,6 +235,7 @@ def _get_ocr():
 
         def _init():
             try:
+                _ensure_paddle_patched()
                 from paddleocr import PaddleOCR
                 result[0] = PaddleOCR(
                     use_angle_cls=True,
@@ -285,6 +294,7 @@ def _init_worker():
     # set both for compatibility.
     os.environ['FLAGS_use_mkldnn'] = '0'
     os.environ['FLAGS_use_onednn'] = '0'
+    _ensure_paddle_patched()
     from paddleocr import PaddleOCR
     import paddle
     paddle.set_flags({'FLAGS_use_mkldnn': False, 'FLAGS_use_onednn': False})
@@ -311,6 +321,20 @@ def _render_and_ocr_worker(args: tuple) -> tuple[int, str]:
         img_bytes = pix.tobytes("png")
 
     result = _worker_ocr.ocr(img_bytes)
+    if not result or not result[0]:
+        return (page_idx + 1, "")
+    lines = [line[1][0] for line in result[0]]
+    return (page_idx + 1, "\n".join(lines))
+
+
+def _render_and_ocr_single(filepath: str, page_idx: int, ocr) -> tuple[int, str]:
+    """Render a page and OCR it in the current process."""
+    with fitz.open(filepath) as doc:
+        page = doc[page_idx]
+        pix = page.get_pixmap(dpi=300)
+        img_bytes = pix.tobytes("png")
+
+    result = ocr.ocr(img_bytes)
     if not result or not result[0]:
         return (page_idx + 1, "")
     lines = [line[1][0] for line in result[0]]
@@ -361,40 +385,89 @@ def extract_text_from_pdf(
 
     # ── Parallel render + OCR via process pool ──────────────────────
     # Each worker process has its own PaddleOCR instance.
-    # On Windows, the module-level _patch_paddle_inference() disables
-    # OneDNN in each spawned worker.
+    # On Windows, _init_worker() applies the OneDNN patch in each worker.
     if ocr_page_indices:
-        # Pre-download models in main process to avoid race conditions
-        # when multiple workers try to download simultaneously.
-        _get_ocr()
+        # Pre-download / initialize models in main process first.
+        # If OCR cannot initialize, skip scanned pages but keep text-layer pages.
+        main_ocr = _get_ocr()
+        if main_ocr is None:
+            logger.warning(
+                "PaddleOCR unavailable; skipping OCR for %d scanned pages",
+                len(ocr_page_indices),
+            )
+            text_pages.sort(key=lambda x: x[0])
+            return text_pages
 
-        num_workers = min(os.cpu_count() or 4, 8)
+        num_workers = min(os.cpu_count() or 4, 8, len(ocr_page_indices))
         logger.info(
             "Parallel render+OCR: %d pages, %d worker processes",
             len(ocr_page_indices), num_workers,
         )
 
         completed = 0
-        with ProcessPoolExecutor(
-            max_workers=num_workers, initializer=_init_worker
-        ) as pool:
-            tasks = [(filepath, idx) for idx in ocr_page_indices]
-            future_to_idx = {
-                pool.submit(_render_and_ocr_worker, task): task[1]
-                for task in tasks
-            }
-            for future in as_completed(future_to_idx):
+        processed_indices: set[int] = set()
+        remaining_indices: list[int] = []
+
+        try:
+            with ProcessPoolExecutor(
+                max_workers=num_workers, initializer=_init_worker
+            ) as pool:
+                tasks = [(filepath, idx) for idx in ocr_page_indices]
+                future_to_idx = {
+                    pool.submit(_render_and_ocr_worker, task): task[1]
+                    for task in tasks
+                }
+                for future in as_completed(future_to_idx):
+                    page_idx = future_to_idx[future]
+                    try:
+                        page_num, text = future.result()
+                        processed_indices.add(page_idx)
+                        if text:
+                            text_pages.append((page_num, text))
+                    except BrokenProcessPool:
+                        logger.warning(
+                            "OCR process pool crashed; falling back to sequential OCR for remaining pages",
+                            exc_info=True,
+                        )
+                        remaining_indices = [
+                            idx for idx in ocr_page_indices if idx not in processed_indices
+                        ]
+                        break
+                    except Exception:
+                        logger.warning(
+                            "Render+OCR failed for page %d",
+                            page_idx + 1, exc_info=True,
+                        )
+
+                    completed += 1
+                    if progress_callback:
+                        progress_callback(text_count + completed, total_pages)
+        except BrokenProcessPool:
+            logger.warning(
+                "OCR process pool crashed before completion; falling back to sequential OCR",
+                exc_info=True,
+            )
+            remaining_indices = [
+                idx for idx in ocr_page_indices if idx not in processed_indices
+            ]
+
+        # Fallback path: finish unprocessed OCR pages in current process.
+        if remaining_indices:
+            logger.info(
+                "Sequential OCR fallback: %d remaining pages",
+                len(remaining_indices),
+            )
+            for page_idx in remaining_indices:
                 try:
-                    page_num, text = future.result()
+                    page_num, text = _render_and_ocr_single(filepath, page_idx, main_ocr)
                     if text:
                         text_pages.append((page_num, text))
                 except Exception:
-                    page_idx = future_to_idx[future]
                     logger.warning(
-                        "Render+OCR failed for page %d",
-                        page_idx + 1, exc_info=True,
+                        "Sequential OCR fallback failed for page %d",
+                        page_idx + 1,
+                        exc_info=True,
                     )
-
                 completed += 1
                 if progress_callback:
                     progress_callback(text_count + completed, total_pages)

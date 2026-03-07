@@ -1,5 +1,6 @@
 """PyInstaller entry point for the FindWords backend server."""
 
+import multiprocessing
 import sys
 import os
 
@@ -13,12 +14,14 @@ else:
 # Ensure the app package is importable
 sys.path.insert(0, _bundle_dir)
 
-import uvicorn
-# Direct import so PyInstaller can trace the dependency tree
-from app.main import app as application
-
 
 def main():
+    # Import uvicorn and the FastAPI app inside main() so that
+    # multiprocessing worker processes (which re-run this script on
+    # Windows/spawn) never import or start the server.
+    import uvicorn
+    from app.main import app as application
+
     host = os.environ.get("FINDWORDS_HOST", "127.0.0.1")
     port = int(os.environ.get("FINDWORDS_PORT", "8000"))
 
@@ -31,4 +34,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # On Windows (spawn), ProcessPoolExecutor worker processes re-run
+    # this entry point.  freeze_support() detects child workers and
+    # routes them to the multiprocessing protocol instead of main().
+    multiprocessing.freeze_support()
     main()

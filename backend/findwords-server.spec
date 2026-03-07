@@ -2,7 +2,7 @@
 """PyInstaller spec file for FindWords backend server."""
 
 import sys
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 block_cipher = None
 IS_WINDOWS = sys.platform.startswith('win')
@@ -11,15 +11,22 @@ USE_UPX = not IS_WINDOWS
 
 # Collect data files for packages that need them
 opencc_datas = collect_data_files('opencc')
-paddleocr_datas = collect_data_files('paddleocr')
+paddleocr_datas = collect_data_files('paddleocr', include_py_files=True)
 paddle_datas = collect_data_files('paddle', include_py_files=True)
 selenium_datas = collect_data_files('selenium')
+cython_datas = collect_data_files('Cython')
+pillow_datas = collect_data_files('PIL', include_py_files=True)
+pillow_hiddenimports = collect_submodules('PIL')
+skimage_hiddenimports = collect_submodules('skimage')
+scipy_hiddenimports = collect_submodules('scipy')
+albumentations_hiddenimports = collect_submodules('albumentations')
+imgaug_hiddenimports = collect_submodules('imgaug')
 
 a = Analysis(
     ['run_server.py'],
     pathex=['.'],
     binaries=[],
-    datas=opencc_datas + paddleocr_datas + paddle_datas + selenium_datas,
+    datas=opencc_datas + paddleocr_datas + paddle_datas + selenium_datas + cython_datas + pillow_datas,
     hiddenimports=[
         # --- uvicorn ---
         'uvicorn',
@@ -55,6 +62,8 @@ a = Analysis(
         'h11',
         'certifi',
         'idna',
+        'charset_normalizer',
+        'chardet',
         # --- AI / LLM ---
         'langgraph',
         'openai',
@@ -73,6 +82,11 @@ a = Analysis(
         'pyclipper',
         'imgaug',
         'lmdb',
+        'skimage',
+        'scipy',
+        'albumentations',
+        'cv2',
+        'docx',
         # --- selenium browser drivers (deferred imports in cbeta_scraper.py) ---
         'selenium',
         'selenium.webdriver',
@@ -104,89 +118,10 @@ a = Analysis(
         'selenium.webdriver.remote.webelement',
         'selenium.common',
         'selenium.common.exceptions',
-    ],
+    ] + pillow_hiddenimports + skimage_hiddenimports + scipy_hiddenimports + albumentations_hiddenimports + imgaug_hiddenimports,
     hookspath=['hooks'],
     hooksconfig={},
     runtime_hooks=['hooks/rthook_cv2.py'],
-    excludes=[
-        # --- ML frameworks not used ---
-        'nltk',
-        'scipy',
-        'pandas',
-        'matplotlib',
-        'IPython',
-        'jupyter',
-        'notebook',
-        'tensorflow',
-        'torch',
-        'torchvision',
-        'tokenizers',
-        'sklearn',
-        'pytest',
-        'setuptools.tests',
-        'huggingface_hub',
-        'e2b',
-        'ray',
-        'transformers',
-        'pyarrow',
-        'llvmlite',
-        'numba',
-        'spacy',
-        'lightgbm',
-        'statsmodels',
-        'plotly',
-        'faiss',
-        'h5py',
-        'skimage',
-        'jieba',
-        'pdfminer',
-        'pikepdf',
-        'grpc',
-        'rapidocr_onnxruntime',
-        'onnxruntime',
-        # --- browser / automation (playwright not needed) ---
-        'playwright',
-        # --- cloud SDKs ---
-        'botocore',
-        'boto3',
-        's3transfer',
-        # --- crypto / encoding not needed ---
-        'cryptography',
-        'Crypto',
-        'pycryptodome',
-        # --- data / NLP tools not needed ---
-        'lxml',
-        'rapidfuzz',
-        'pypdfium2',
-        'onnx',
-        'emoji',
-        'Cython',
-        'timm',
-        'tiktoken',
-        'pi_heif',
-        'langdetect',
-        # --- GUI / Tk not needed ---
-        'tkinter',
-        '_tkinter',
-        'tcl',
-        'tcl8',
-        # --- telemetry / monitoring ---
-        'opentelemetry',
-        'sentry_sdk',
-        # --- misc not needed ---
-        'datasets',
-        'altair',
-        'pyecharts',
-        'pycocotools',
-        'flask',
-        'werkzeug',
-        'lightning',
-        'fvcore',
-        'redis',
-        'pymilvus',
-        'mcp',
-        'ollama',
-    ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
