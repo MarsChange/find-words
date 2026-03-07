@@ -28,6 +28,9 @@ extraResources:
     to: frontend-dist
     filter:
       - "**/*"
+  # Window icon for runtime use on Windows
+  - from: electron/icons/icon.ico
+    to: icon.ico
 
 mac:
   category: public.app-category.reference

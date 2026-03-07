@@ -298,7 +298,7 @@ def _thinking_kwargs() -> dict:
     enable_thinking = get_setting("enable_thinking")
     if enable_thinking == "true":
         return {"extra_body": {"enable_thinking": True, "enable_search": True}}
-    return {}
+    return {"extra_body": {"enable_thinking": False, "enable_search": True}}
 
 
 # ── Graph construction ───────────────────────────────────────────────────────
@@ -493,7 +493,7 @@ def run_chat_streaming(message: str, history: list[dict],
     system_content += (
         "\n\n务必注意回答的专业性和准确性，并适当结合检索结果的例句和上述分析结果，"
         "以及联网搜索得到的相关资料，理解该词语在古籍中的出处和上下文含义，"
-        "根据用户的输入，为用户提供专业化的分析。"
+        "用户会基于上述的检索结果和分析报告，向你进行多轮对话，如果用户以正常聊天的方式与你对话，请直接对话即可，若用户提问与上述分析的结果相关的问题，请结合分析结果提供专业化的回答。"
     )
     
     try:

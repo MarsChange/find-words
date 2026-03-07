@@ -164,12 +164,22 @@ function waitForBackend(retries = 240, interval = 500) {
  * Create the main application window.
  */
 function createWindow() {
+  // On Windows, BrowserWindow needs an explicit icon for the title bar / taskbar.
+  // In packaged mode, __dirname is inside app.asar, so use the extraResource copy.
+  let iconPath;
+  if (process.platform === 'win32') {
+    iconPath = IS_DEV
+      ? path.join(__dirname, 'icons', 'icon.ico')
+      : path.join(process.resourcesPath, 'icon.ico');
+  }
+
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
     minWidth: 900,
     minHeight: 600,
     title: '古籍词语检索分析系统',
+    ...(iconPath ? { icon: iconPath } : {}),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
