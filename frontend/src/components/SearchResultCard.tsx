@@ -51,6 +51,12 @@ export default function SearchResultCard({ result, keyword, traditionalKeyword, 
         {result.source === 'local' && (
           <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-xs text-emerald-600">本地</span>
         )}
+        {result.source === 'local' && result.content_type === 'body' && (
+          <span className="rounded bg-sky-500/10 px-1.5 py-0.5 text-xs text-sky-600">正文</span>
+        )}
+        {result.source === 'local' && result.content_type === 'annotation' && (
+          <span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-xs text-violet-600">注文</span>
+        )}
         {result.source === 'cbeta' && (
           <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-700">CBETA</span>
         )}

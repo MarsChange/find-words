@@ -14,6 +14,7 @@ export default function SearchPage() {
   const navigate = useNavigate();
   const [keyword, setKeyword] = useState('');
   const [useCbeta, setUseCbeta] = useState(false);
+  const [includeAnnotations, setIncludeAnnotations] = useState(false);
   const [results, setResults] = useState<SearchResultItem[]>([]);
   const [total, setTotal] = useState(0);
   const [isSearching, setIsSearching] = useState(false);
@@ -81,6 +82,7 @@ export default function SearchPage() {
         type: 'search_stream',
         query: q,
         use_cbeta: useCbeta,
+        include_annotations: includeAnnotations,
         session_id: session.id,
       });
     } catch {
@@ -88,7 +90,7 @@ export default function SearchPage() {
       setTotal(0);
       setIsSearching(false);
     }
-  }, [keyword, useCbeta]);
+  }, [keyword, useCbeta, includeAnnotations]);
 
   const handleViewInReader = (fileId: number, page: number) => {
     navigate(`/reader/${fileId}?page=${page}&keyword=${encodeURIComponent(keyword)}`);
@@ -177,6 +179,15 @@ export default function SearchPage() {
                 className="h-4 w-4 rounded border-parchment-300 text-cinnabar-500 focus:ring-cinnabar-400"
               />
               同时检索 CBETA 线上佛典
+            </label>
+            <label className="flex cursor-pointer items-center gap-2 text-sm text-ink-700">
+              <input
+                type="checkbox"
+                checked={includeAnnotations}
+                onChange={(e) => setIncludeAnnotations(e.target.checked)}
+                className="h-4 w-4 rounded border-parchment-300 text-cinnabar-500 focus:ring-cinnabar-400"
+              />
+              一并检索注文
             </label>
             <div className="flex items-center gap-1.5 text-sm text-ink-700">
               <span className="text-parchment-400">朝代筛选:</span>

@@ -39,6 +39,7 @@ class FileUpdateRequest(BaseModel):
 class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=200)
     use_cbeta: bool = False
+    include_annotations: bool = False
     session_id: Optional[int] = None
 
 
@@ -47,6 +48,7 @@ class SearchHit(BaseModel):
     file_id: Optional[int] = None
     filename: Optional[str] = None
     page_num: Optional[int] = None
+    content_type: str = "body"
     snippet: str
     snippets: list[str] = []
     dynasty: str = ""
@@ -161,8 +163,10 @@ class SessionSearchResultsResponse(BaseModel):
 class AppSettingsResponse(BaseModel):
     cbeta_max_results: int = 20
     enable_thinking: bool = False
+    ocr_model: str = "qwen3.5-plus"
 
 
 class AppSettingsUpdateRequest(BaseModel):
     cbeta_max_results: Optional[int] = Field(None, ge=5, le=100)
     enable_thinking: Optional[bool] = None
+    ocr_model: Optional[str] = None

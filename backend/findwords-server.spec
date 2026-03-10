@@ -11,22 +11,13 @@ USE_UPX = not IS_WINDOWS
 
 # Collect data files for packages that need them
 opencc_datas = collect_data_files('opencc')
-paddleocr_datas = collect_data_files('paddleocr', include_py_files=True)
-paddle_datas = collect_data_files('paddle', include_py_files=True)
 selenium_datas = collect_data_files('selenium')
-cython_datas = collect_data_files('Cython')
-pillow_datas = collect_data_files('PIL', include_py_files=True)
-pillow_hiddenimports = collect_submodules('PIL')
-skimage_hiddenimports = collect_submodules('skimage')
-scipy_hiddenimports = collect_submodules('scipy')
-albumentations_hiddenimports = collect_submodules('albumentations')
-imgaug_hiddenimports = collect_submodules('imgaug')
 
 a = Analysis(
     ['run_server.py'],
     pathex=['.'],
     binaries=[],
-    datas=opencc_datas + paddleocr_datas + paddle_datas + selenium_datas + cython_datas + pillow_datas,
+    datas=opencc_datas + selenium_datas,
     hiddenimports=[
         # --- uvicorn ---
         'uvicorn',
@@ -64,29 +55,13 @@ a = Analysis(
         'idna',
         'charset_normalizer',
         'chardet',
-        # --- AI / LLM ---
+        # --- AI / LLM / VLM OCR ---
         'langgraph',
         'openai',
         # --- document processing ---
         'opencc',
         'fitz',
         'pymupdf',
-        # --- OCR (PaddleOCR) ---
-        'paddleocr',
-        'paddle',
-        'paddle.utils',
-        'paddle.dataset',
-        'paddle.reader',
-        'paddle.fluid',
-        'shapely',
-        'pyclipper',
-        'imgaug',
-        'lmdb',
-        'skimage',
-        'scipy',
-        'albumentations',
-        'cv2',
-        'docx',
         # --- selenium browser drivers (deferred imports in cbeta_scraper.py) ---
         'selenium',
         'selenium.webdriver',
@@ -118,10 +93,10 @@ a = Analysis(
         'selenium.webdriver.remote.webelement',
         'selenium.common',
         'selenium.common.exceptions',
-    ] + pillow_hiddenimports + skimage_hiddenimports + scipy_hiddenimports + albumentations_hiddenimports + imgaug_hiddenimports,
-    hookspath=['hooks'],
+    ],
+    hookspath=[],
     hooksconfig={},
-    runtime_hooks=['hooks/rthook_cv2.py'],
+    runtime_hooks=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,

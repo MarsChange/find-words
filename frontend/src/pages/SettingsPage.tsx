@@ -42,6 +42,12 @@ export default function SettingsPage() {
   const [thinkingSaved, setThinkingSaved] = useState(false);
   const [thinkingError, setThinkingError] = useState('');
 
+  // OCR model settings
+  const [ocrModel, setOcrModel] = useState('qwen3.5-plus');
+  const [ocrModelSaving, setOcrModelSaving] = useState(false);
+  const [ocrModelSaved, setOcrModelSaved] = useState(false);
+  const [ocrModelError, setOcrModelError] = useState('');
+
   useEffect(() => {
     getSettings()
       .then((data) => {
@@ -55,6 +61,7 @@ export default function SettingsPage() {
       .then((data) => {
         setCbetaMaxResults(data.cbeta_max_results);
         setEnableThinking(data.enable_thinking);
+        setOcrModel(data.ocr_model);
       })
       .catch(() => {
         // Use defaults
@@ -134,6 +141,23 @@ export default function SettingsPage() {
       setThinkingError('保存失败，请重试。');
     } finally {
       setThinkingSaving(false);
+    }
+  };
+
+  const handleOcrModelChange = async (model: string) => {
+    setOcrModel(model);
+    setOcrModelSaved(false);
+    setOcrModelError('');
+    setOcrModelSaving(true);
+    try {
+      const result = await updateAppSettings({ ocr_model: model });
+      setOcrModel(result.ocr_model);
+      setOcrModelSaved(true);
+      setTimeout(() => setOcrModelSaved(false), 3000);
+    } catch {
+      setOcrModelError('保存失败，请重试。');
+    } finally {
+      setOcrModelSaving(false);
     }
   };
 
@@ -311,6 +335,30 @@ export default function SettingsPage() {
             {thinkingSaving && <span className="text-xs text-parchment-400">保存中...</span>}
             {thinkingSaved && <span className="text-xs text-green-600">已保存</span>}
             {thinkingError && <span className="text-xs text-red-500">{thinkingError}</span>}
+          </div>
+        </div>
+      </div>
+
+      {/* OCR Model */}
+      <div className="mt-6 rounded-lg border border-parchment-200 bg-white p-6 shadow-sm">
+        <h2 className="mb-4 font-serif text-lg font-medium text-ink-800">OCR 多模态大模型</h2>
+
+        <div>
+          <p className="mb-3 text-xs text-parchment-400">
+            选择用于识别古籍PDF图像文字的多模态大模型。
+          </p>
+          <div className="flex items-center gap-3">
+            <select
+              value={ocrModel}
+              onChange={(e) => handleOcrModelChange(e.target.value)}
+              className="w-48 rounded-md border border-parchment-200 bg-parchment-50 px-3 py-2 text-sm text-ink-800 focus:border-cinnabar-400 focus:outline-none focus:ring-1 focus:ring-cinnabar-400"
+            >
+              <option value="qwen3.5-plus">qwen3.5-plus</option>
+              <option value="qwen3.5-flash">qwen3.5-flash</option>
+            </select>
+            {ocrModelSaving && <span className="text-xs text-parchment-400">保存中...</span>}
+            {ocrModelSaved && <span className="text-xs text-green-600">已保存</span>}
+            {ocrModelError && <span className="text-xs text-red-500">{ocrModelError}</span>}
           </div>
         </div>
       </div>

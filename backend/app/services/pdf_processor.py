@@ -1,26 +1,17 @@
-"""PDF processing service using PyMuPDF (fitz) with PaddleOCR."""
+"""PDF processing service using PyMuPDF (fitz) with DashScope VLM OCR."""
 
+import base64
+import json
 import logging
 import os
-import platform
-import time
 import threading
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from concurrent.futures.process import BrokenProcessPool
-from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
-import sys
-
-# Disable OneDNN BEFORE importing paddle/paddleocr.
-# PaddlePaddle 3.x auto-enables OneDNN on x86 Windows, causing
-# fused_conv2d crashes. Must set both old and new flag names.
-if platform.system() == "Windows":
-    os.environ.setdefault('FLAGS_use_mkldnn', '0')
-    os.environ.setdefault('FLAGS_use_onednn', '0')
 
 import fitz  # PyMuPDF
 
 from app.core.database import (
+    get_setting,
     index_pages_batch,
     update_file_status,
 )
@@ -31,342 +22,117 @@ logger = logging.getLogger(__name__)
 # Batch size for FTS5 inserts
 _DB_BATCH_SIZE = 50
 
-# Platform flag for runtime OCR strategy tweaks.
-_IS_WINDOWS = platform.system() == "Windows"
+# DashScope VLM configuration
+_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+_VLM_PROMPT = (
+    "以上图片为竖排繁体中文古籍，图中的大号加粗字体为古籍正文，"
+    "小号字体为注文，我需要将正文和注文作隔断区分。"
+    "请为我OCR该图片，区分正文与注文，并严格以如下JSON格式输出：\n"
+    '{"正文": "此处放正文内容", "注文": "此处放注文内容"}\n'
+    "要求：1.仅输出JSON，不要输出任何其他内容。"
+    "2.若该页无注文，则注文字段输出空字符串。"
+    "3.若该页无正文，则正文字段输出空字符串。"
+)
 
 
-def _patch_paddle_inference():
-    """Monkey-patch paddle.inference.create_predictor to force-disable OneDNN.
+def _get_api_key() -> str | None:
+    """Return the DashScope API key.
 
-    On Windows x86, PaddlePaddle's IR optimization passes (conv_bn_fuse_pass,
-    conv_eltwiseadd_bn_fuse_pass) create fused_conv2d operators that invoke
-    OneDNN internally, even when enable_mkldnn=False. This patch intercepts
-    the config before predictor creation to explicitly disable OneDNN and
-    remove problematic fuse passes.
+    Priority: DASHSCOPE_API_KEY env var > configured llm_provider_api_key.
     """
-    try:
-        from paddle import inference
-    except ImportError:
-        return
-
-    _original = inference.create_predictor
-
-    def _safe_create_predictor(config):
-        # Force-disable OneDNN/MKLDNN at inference config level
-        if hasattr(config, 'disable_mkldnn'):
-            config.disable_mkldnn()
-        if hasattr(config, 'disable_onednn'):
-            config.disable_onednn()
-        # Delete IR passes that produce fused_conv2d (requires OneDNN)
-        for pass_name in [
-            'conv_bn_fuse_pass',
-            'conv_eltwiseadd_bn_fuse_pass',
-            'conv_transpose_bn_fuse_pass',
-            'conv_transpose_eltwiseadd_bn_fuse_pass',
-            'conv_elementwise_add_mkldnn_fuse_pass',
-            'depthwise_conv_mkldnn_pass',
-        ]:
-            try:
-                config.delete_pass(pass_name)
-            except Exception:
-                pass
-        return _original(config)
-
-    inference.create_predictor = _safe_create_predictor
-    logger.info("Patched paddle.inference.create_predictor to disable OneDNN")
+    key = os.environ.get("DASHSCOPE_API_KEY")
+    if key:
+        return key
+    import app.config as cfg
+    return cfg.settings.llm_provider_api_key or None
 
 
-# Track whether the paddle inference patch has been applied
-_paddle_patched = False
+def _get_ocr_model() -> str:
+    """Read the OCR model name from DB settings."""
+    model = get_setting("ocr_model")
+    return model or "qwen3.5-plus"
 
 
-def _ensure_paddle_patched():
-    """Apply the OneDNN monkey-patch once, lazily (not at import time)."""
-    global _paddle_patched
-    if _paddle_patched or not _IS_WINDOWS:
-        return
-    _paddle_patched = True
-    _patch_paddle_inference()
+def _parse_vlm_response(text: str) -> tuple[str, str]:
+    """Extract 正文 (body) and 注文 (annotation) from VLM JSON response.
 
-
-def _diagnose_paddle_env():
-    """Print diagnostic info about the PaddlePaddle / PaddleOCR environment.
-
-    Run this on Windows to debug OneDNN issues.
-    Call via:  python -c "from app.services.pdf_processor import _diagnose_paddle_env; _diagnose_paddle_env()"
+    Returns (body_text, annotation_text). Either may be empty.
     """
-    print("=" * 60)
-    print("PaddlePaddle / PaddleOCR Diagnostic Report")
-    print("=" * 60)
-    print(f"Platform: {platform.system()} {platform.machine()}")
-    print(f"Python:   {sys.version}")
+    # Strip markdown code fences if present (e.g. ```json ... ```)
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        # Remove first line (```json) and last line (```)
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        cleaned = "\n".join(lines).strip()
 
-    # 1. Env vars
-    print("\n--- OneDNN Environment Variables ---")
-    for key in ['FLAGS_use_mkldnn', 'FLAGS_use_onednn', 'FLAGS_use_mkl']:
-        print(f"  {key} = {os.environ.get(key, '<not set>')}")
-
-    # 2. Paddle version and flags
     try:
-        import paddle
-        print(f"\n--- PaddlePaddle {paddle.__version__} ---")
-        for flag in ['FLAGS_use_mkldnn', 'FLAGS_use_onednn']:
-            try:
-                val = paddle.get_flags([flag])
-                print(f"  {flag} = {val[flag]}")
-            except Exception as e:
-                print(f"  {flag} = ERROR: {e}")
-    except ImportError:
-        print("\n  PaddlePaddle not installed!")
-        return
+        data = json.loads(cleaned)
+        body = str(data.get("正文", "")).strip()
+        annotation = str(data.get("注文", "")).strip()
+        return body, annotation
+    except (json.JSONDecodeError, AttributeError):
+        logger.warning("VLM response is not valid JSON, falling back to raw text")
 
-    # 3. PaddleOCR version
-    try:
-        import paddleocr
-        print(f"\n--- PaddleOCR {paddleocr.__version__} ---")
-    except ImportError:
-        print("\n  PaddleOCR not installed!")
-        return
-
-    # 4. Inference Config defaults
-    print("\n--- Inference Config Defaults ---")
-    from paddle import inference
-    c = inference.Config()
-    print(f"  mkldnn_enabled: {c.mkldnn_enabled()}")
-    if hasattr(c, 'onednn_enabled'):
-        print(f"  onednn_enabled: {c.onednn_enabled()}")
-
-    # Check available passes
-    if hasattr(c, 'pass_builder'):
-        pb = c.pass_builder()
-        if hasattr(pb, 'all_passes'):
-            passes = pb.all_passes()
-            fuse = [p for p in passes if 'fuse' in p or 'mkldnn' in p or 'onednn' in p]
-            print(f"  Total IR passes: {len(passes)}")
-            print(f"  Fuse/MKLDNN passes ({len(fuse)}):")
-            for p in fuse:
-                print(f"    {p}")
-
-    # 5. Try creating PaddleOCR
-    print("\n--- PaddleOCR Creation Test ---")
-    from paddleocr import PaddleOCR
-    try:
-        ocr = PaddleOCR(
-            use_angle_cls=True, lang="chinese_cht",
-            show_log=False, enable_mkldnn=False,
-        )
-        print("  PaddleOCR created OK")
-    except Exception as e:
-        print(f"  PaddleOCR creation FAILED: {e}")
-        return
-
-    # 6. Try OCR on a tiny test image
-    print("\n--- OCR Test (tiny image) ---")
-    import numpy as np
-    # Create a small white image with some black pixels
-    img = np.ones((100, 300, 3), dtype=np.uint8) * 255
-    try:
-        result = ocr.ocr(img)
-        print(f"  OCR on blank image: OK (result={result})")
-    except Exception as e:
-        print(f"  OCR on blank image FAILED: {type(e).__name__}: {e}")
-
-    # 7. Try OCR on an actual PDF page if available
-    print("\n--- OCR Test (PDF page) ---")
-    import glob
-    pdfs = glob.glob("data/uploads/*.pdf")
-    if not pdfs:
-        print("  No PDFs found in data/uploads/")
-    else:
-        pdf_path = pdfs[0]
-        print(f"  Testing with: {pdf_path}")
-        try:
-            doc = fitz.open(pdf_path)
-            # Find first image-only page
-            test_page = None
-            for i in range(min(10, doc.page_count)):
-                if not doc[i].get_text().strip():
-                    test_page = i
-                    break
-            if test_page is None:
-                test_page = 0
-            page = doc[test_page]
-            pix = page.get_pixmap(dpi=300)
-            img_bytes = pix.tobytes("png")
-            doc.close()
-            print(f"  Page {test_page + 1}: {len(img_bytes)} bytes")
-            t0 = time.time()
-            result = ocr.ocr(img_bytes)
-            t1 = time.time()
-            if result and result[0]:
-                lines = [line[1][0] for line in result[0]]
-                print(f"  OCR OK: {len(lines)} lines, {t1-t0:.2f}s")
-                print(f"  First line: {lines[0][:50]}")
-            else:
-                print(f"  OCR returned empty result, {t1-t0:.2f}s")
-        except Exception as e:
-            print(f"  OCR FAILED: {type(e).__name__}: {e}")
-            import traceback
-            traceback.print_exc()
-
-    print("\n" + "=" * 60)
-
-# Lazy-loaded PaddleOCR instance
-_ocr_engine = None
-_ocr_lock = threading.Lock()
-_ocr_init_failed = False
+    # Fallback: treat whole response as body
+    return text.strip(), ""
 
 
-def _get_ocr():
-    """Get or create the PaddleOCR engine (thread-safe singleton)."""
-    global _ocr_engine, _ocr_init_failed
-    if _ocr_engine is not None:
-        return _ocr_engine
-    if _ocr_init_failed:
-        return None
-    with _ocr_lock:
-        if _ocr_engine is not None:
-            return _ocr_engine
-        if _ocr_init_failed:
-            return None
+def _ocr_page_vlm(img_bytes: bytes, model: str, api_key: str) -> tuple[str, str]:
+    """Send a page image to DashScope VLM and return (body, annotation).
 
-        result = [None]
-        error = [None]
-
-        def _init():
-            try:
-                _ensure_paddle_patched()
-                from paddleocr import PaddleOCR
-                result[0] = PaddleOCR(
-                    use_angle_cls=True,
-                    lang="chinese_cht",
-                    show_log=False,
-                    enable_mkldnn=False,
-                )
-            except Exception as e:
-                error[0] = e
-
-        init_thread = threading.Thread(target=_init, daemon=True)
-        init_thread.start()
-        init_thread.join(timeout=120)
-
-        if init_thread.is_alive():
-            logger.warning(
-                "PaddleOCR initialization timed out (>120s). "
-                "OCR is disabled. Scanned PDFs will not be indexed."
-            )
-            _ocr_init_failed = True
-            return None
-
-        if error[0] is not None:
-            logger.warning(
-                "PaddleOCR initialization failed: %s. "
-                "Scanned PDFs will not be indexed.",
-                error[0],
-            )
-            _ocr_init_failed = True
-            return None
-
-        if result[0] is not None:
-            _ocr_engine = result[0]
-            logger.info("PaddleOCR engine initialized (chinese_cht)")
-            return _ocr_engine
-
-        logger.warning("PaddleOCR initialization returned None")
-        _ocr_init_failed = True
-        return None
-
-
-# Each worker process holds its own PaddleOCR instance
-_worker_ocr = None
-
-
-def _init_worker():
-    """Initialize PaddleOCR once per worker process.
-
-    On Windows, the module-level _patch_paddle_inference() runs when
-    this module is re-imported in the spawned process, disabling OneDNN.
-    Retries on PermissionError for model file-lock races.
+    Uses the OpenAI-compatible SDK.
     """
-    global _worker_ocr
-    # Disable OneDNN BEFORE importing paddle.
-    # PaddlePaddle 3.x renamed FLAGS_use_mkldnn -> FLAGS_use_onednn;
-    # set both for compatibility.
-    os.environ['FLAGS_use_mkldnn'] = '0'
-    os.environ['FLAGS_use_onednn'] = '0'
-    _ensure_paddle_patched()
-    from paddleocr import PaddleOCR
-    import paddle
-    paddle.set_flags({'FLAGS_use_mkldnn': False, 'FLAGS_use_onednn': False})
-    for attempt in range(3):
-        try:
-            _worker_ocr = PaddleOCR(
-                use_angle_cls=True, lang="chinese_cht", show_log=False,
-                enable_mkldnn=False, use_gpu=False,
-            )
-            return
-        except PermissionError:
-            if attempt < 2:
-                time.sleep(2 * (attempt + 1))
-            else:
-                raise
+    from openai import OpenAI
 
+    client = OpenAI(
+        api_key=api_key,
+        base_url=_DASHSCOPE_BASE_URL,
+    )
 
-def _render_and_ocr_worker(args: tuple) -> tuple[int, str]:
-    """Render a page then OCR it. Runs in a worker process."""
-    filepath, page_idx = args
-    with fitz.open(filepath) as doc:
-        page = doc[page_idx]
-        pix = page.get_pixmap(dpi=300)
-        img_bytes = pix.tobytes("png")
-
-    result = _worker_ocr.ocr(img_bytes)
-    if not result or not result[0]:
-        return (page_idx + 1, "")
-    lines = [line[1][0] for line in result[0]]
-    return (page_idx + 1, "\n".join(lines))
-
-
-def _render_and_ocr_single(filepath: str, page_idx: int, ocr) -> tuple[int, str]:
-    """Render a page and OCR it in the current process."""
-    with fitz.open(filepath) as doc:
-        page = doc[page_idx]
-        pix = page.get_pixmap(dpi=300)
-        img_bytes = pix.tobytes("png")
-
-    result = ocr.ocr(img_bytes)
-    if not result or not result[0]:
-        return (page_idx + 1, "")
-    lines = [line[1][0] for line in result[0]]
-    return (page_idx + 1, "\n".join(lines))
+    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+    completion = client.chat.completions.create(
+        model=model,
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                {"type": "text", "text": _VLM_PROMPT},
+            ],
+        }],
+        response_format={"type": "json_object"},
+    )
+    response_text = completion.choices[0].message.content or ""
+    return _parse_vlm_response(response_text)
 
 
 def extract_text_from_pdf(
     filepath: str,
     progress_callback: Callable[[int, int], None] | None = None,
-) -> list[tuple[int, str]]:
+) -> list[tuple[int, str, str]]:
     """
     Extract text from every page of a PDF file.
 
     1. Fast pre-scan (single-threaded): extract text-layer pages and
        identify image-only pages needing OCR.
-    2. Fully parallel render+OCR: each worker opens its own document,
-       renders its assigned page, and runs OCR — all in parallel.
+    2. Parallel VLM OCR via ThreadPoolExecutor for image-only pages.
 
-    Returns a list of (page_number, text) tuples (1-indexed pages).
+    Returns a list of (page_number, body_text, annotation_text) tuples
+    (1-indexed pages).  For text-layer pages, annotation_text is empty.
     """
-    text_pages: list[tuple[int, str]] = []
+    text_pages: list[tuple[int, str, str]] = []
     ocr_page_indices: list[int] = []
 
     try:
         with fitz.open(filepath) as doc:
             total_pages = doc.page_count
 
-            # ── Pre-scan: extract text pages & identify OCR pages ──
+            # Pre-scan: extract text pages & identify OCR pages
             for i, page in enumerate(doc):
                 text = page.get_text().strip()
                 if text:
-                    text_pages.append((i + 1, text))
+                    text_pages.append((i + 1, text, ""))
                 else:
                     ocr_page_indices.append(i)
 
@@ -383,91 +149,57 @@ def extract_text_from_pdf(
     if progress_callback:
         progress_callback(text_count, total_pages)
 
-    # ── Parallel render + OCR via process pool ──────────────────────
-    # Each worker process has its own PaddleOCR instance.
-    # On Windows, _init_worker() applies the OneDNN patch in each worker.
+    # Parallel VLM OCR for image-only pages
     if ocr_page_indices:
-        # Pre-download / initialize models in main process first.
-        # If OCR cannot initialize, skip scanned pages but keep text-layer pages.
-        main_ocr = _get_ocr()
-        if main_ocr is None:
+        api_key = _get_api_key()
+        if not api_key:
             logger.warning(
-                "PaddleOCR unavailable; skipping OCR for %d scanned pages",
+                "No DashScope API key configured; skipping OCR for %d scanned pages",
                 len(ocr_page_indices),
             )
             text_pages.sort(key=lambda x: x[0])
             return text_pages
 
-        num_workers = min(os.cpu_count() or 4, 8, len(ocr_page_indices))
+        model = _get_ocr_model()
+
+        # Render all OCR pages to PNG bytes first
+        page_images: dict[int, bytes] = {}
+        with fitz.open(filepath) as doc:
+            for idx in ocr_page_indices:
+                page = doc[idx]
+                pix = page.get_pixmap(dpi=300)
+                page_images[idx] = pix.tobytes("png")
+
+        num_workers = min(8, len(ocr_page_indices))
         logger.info(
-            "Parallel render+OCR: %d pages, %d worker processes",
-            len(ocr_page_indices), num_workers,
+            "Parallel VLM OCR: %d pages, %d threads, model=%s",
+            len(ocr_page_indices), num_workers, model,
         )
 
         completed = 0
-        processed_indices: set[int] = set()
-        remaining_indices: list[int] = []
 
-        try:
-            with ProcessPoolExecutor(
-                max_workers=num_workers, initializer=_init_worker
-            ) as pool:
-                tasks = [(filepath, idx) for idx in ocr_page_indices]
-                future_to_idx = {
-                    pool.submit(_render_and_ocr_worker, task): task[1]
-                    for task in tasks
-                }
-                for future in as_completed(future_to_idx):
-                    page_idx = future_to_idx[future]
-                    try:
-                        page_num, text = future.result()
-                        processed_indices.add(page_idx)
-                        if text:
-                            text_pages.append((page_num, text))
-                    except BrokenProcessPool:
-                        logger.warning(
-                            "OCR process pool crashed; falling back to sequential OCR for remaining pages",
-                            exc_info=True,
-                        )
-                        remaining_indices = [
-                            idx for idx in ocr_page_indices if idx not in processed_indices
-                        ]
-                        break
-                    except Exception:
-                        logger.warning(
-                            "Render+OCR failed for page %d",
-                            page_idx + 1, exc_info=True,
-                        )
+        def _ocr_one(page_idx: int) -> tuple[int, str, str]:
+            img_bytes = page_images[page_idx]
+            body, annotation = _ocr_page_vlm(img_bytes, model, api_key)
+            return (page_idx + 1, body, annotation)
 
-                    completed += 1
-                    if progress_callback:
-                        progress_callback(text_count + completed, total_pages)
-        except BrokenProcessPool:
-            logger.warning(
-                "OCR process pool crashed before completion; falling back to sequential OCR",
-                exc_info=True,
-            )
-            remaining_indices = [
-                idx for idx in ocr_page_indices if idx not in processed_indices
-            ]
-
-        # Fallback path: finish unprocessed OCR pages in current process.
-        if remaining_indices:
-            logger.info(
-                "Sequential OCR fallback: %d remaining pages",
-                len(remaining_indices),
-            )
-            for page_idx in remaining_indices:
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            future_to_idx = {
+                pool.submit(_ocr_one, idx): idx
+                for idx in ocr_page_indices
+            }
+            for future in as_completed(future_to_idx):
+                page_idx = future_to_idx[future]
                 try:
-                    page_num, text = _render_and_ocr_single(filepath, page_idx, main_ocr)
-                    if text:
-                        text_pages.append((page_num, text))
+                    page_num, body, annotation = future.result()
+                    if body or annotation:
+                        text_pages.append((page_num, body, annotation))
                 except Exception:
                     logger.warning(
-                        "Sequential OCR fallback failed for page %d",
-                        page_idx + 1,
+                        "VLM OCR failed for page %d", page_idx + 1,
                         exc_info=True,
                     )
+
                 completed += 1
                 if progress_callback:
                     progress_callback(text_count + completed, total_pages)
@@ -496,8 +228,9 @@ def process_pdf_background(
     """
     Process a PDF in a background thread.
 
-    Extracts text page-by-page (with parallel OCR for scanned pages),
-    indexes into FTS5 in batches, and updates the file status when done.
+    Extracts text page-by-page (with parallel VLM OCR for scanned pages),
+    indexes into FTS5 in batches (body and annotation separately),
+    and updates the file status when done.
     Progress is broadcast via WebSocket to all connected clients.
     """
     if progress_callback is None:
@@ -507,9 +240,12 @@ def process_pdf_background(
         try:
             pages = extract_text_from_pdf(filepath, progress_callback)
             total = len(pages)
-            batch: list[tuple[int, int, str]] = []
-            for page_num, text in pages:
-                batch.append((file_id, page_num, text))
+            batch: list[tuple[int, int, str, str]] = []
+            for page_num, body, annotation in pages:
+                if body:
+                    batch.append((file_id, page_num, body, "body"))
+                if annotation:
+                    batch.append((file_id, page_num, annotation, "annotation"))
                 if len(batch) >= _DB_BATCH_SIZE:
                     index_pages_batch(batch)
                     batch.clear()

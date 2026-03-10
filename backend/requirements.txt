@@ -13,8 +13,3 @@ websockets
 httpx
 charset-normalizer
 chardet
-paddlepaddle
-paddleocr>=2.7,<3
-scikit-image
-albumentations
-python-docx

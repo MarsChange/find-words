@@ -1,7 +1,7 @@
 {
   "name": "findwords",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "古籍词语检索分析系统 - 跨平台桌面应用",
   "main": "electron/main.cjs",
   "author": "Chen Shengfeng",

@@ -68,6 +68,19 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
         raise
 
 
+def _fts_has_content_type(conn: sqlite3.Connection) -> bool:
+    """Check whether the content_fts table already has a content_type column."""
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='content_fts'"
+        ).fetchone()
+        if row and "content_type" in row["sql"]:
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def init_db() -> None:
     """Create tables and FTS5 virtual table if they don't exist."""
     with get_db() as conn:
@@ -82,13 +95,6 @@ def init_db() -> None:
                 author     TEXT    DEFAULT '',
                 page_count INTEGER DEFAULT 0,
                 status     TEXT    DEFAULT 'pending'
-            );
-
-            CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5(
-                file_id,
-                page_num,
-                content,
-                tokenize='unicode61'
             );
 
             CREATE TABLE IF NOT EXISTS sessions (
@@ -131,8 +137,35 @@ def init_db() -> None:
 
             INSERT OR IGNORE INTO settings (key, value) VALUES ('cbeta_max_results', '20');
             INSERT OR IGNORE INTO settings (key, value) VALUES ('enable_thinking', 'false');
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('ocr_model', 'qwen3.5-plus');
             """
         )
+
+        # Migrate FTS5 table: add content_type column if missing.
+        # FTS5 virtual tables cannot be ALTERed, so we must recreate.
+        if not _fts_has_content_type(conn):
+            # Check if the old table exists at all
+            old_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='content_fts'"
+            ).fetchone()
+            if old_exists:
+                # Migrate: copy data, drop old, create new with content_type
+                conn.execute(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS content_fts_new USING fts5("
+                    "file_id, page_num, content_type, content, tokenize='unicode61')"
+                )
+                conn.execute(
+                    "INSERT INTO content_fts_new (file_id, page_num, content_type, content) "
+                    "SELECT file_id, page_num, 'body', content FROM content_fts"
+                )
+                conn.execute("DROP TABLE content_fts")
+                conn.execute("ALTER TABLE content_fts_new RENAME TO content_fts")
+            else:
+                conn.execute(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5("
+                    "file_id, page_num, content_type, content, tokenize='unicode61')"
+                )
+
         # Migrate existing databases: add traditional_keyword column if missing
         try:
             conn.execute(
@@ -281,23 +314,28 @@ def clear_file_content(file_id: int) -> None:
 
 # ── Content indexing ─────────────────────────────────────────────────────────
 
-def index_page(file_id: int, page_num: int, content: str) -> None:
-    """Insert a single page's text into the FTS5 index."""
+def index_page(file_id: int, page_num: int, content: str,
+               content_type: str = "body") -> None:
+    """Insert a single page's text into the FTS5 index.
+
+    Args:
+        content_type: 'body' for 正文, 'annotation' for 注文.
+    """
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO content_fts (file_id, page_num, content) "
-            "VALUES (?, ?, ?)",
-            (str(file_id), str(page_num), _tokenize_cjk(content)),
+            "INSERT INTO content_fts (file_id, page_num, content_type, content) "
+            "VALUES (?, ?, ?, ?)",
+            (str(file_id), str(page_num), content_type, _tokenize_cjk(content)),
         )
 
 
-def index_pages_batch(rows: list[tuple[int, int, str]]) -> None:
-    """Batch-insert multiple (file_id, page_num, content) rows."""
+def index_pages_batch(rows: list[tuple[int, int, str, str]]) -> None:
+    """Batch-insert multiple (file_id, page_num, content, content_type) rows."""
     with get_db() as conn:
         conn.executemany(
-            "INSERT INTO content_fts (file_id, page_num, content) "
-            "VALUES (?, ?, ?)",
-            [(str(fid), str(pn), _tokenize_cjk(c)) for fid, pn, c in rows],
+            "INSERT INTO content_fts (file_id, page_num, content_type, content) "
+            "VALUES (?, ?, ?, ?)",
+            [(str(fid), str(pn), ct, _tokenize_cjk(c)) for fid, pn, c, ct in rows],
         )
 
 
@@ -350,26 +388,34 @@ def _extract_snippets(content: str, keyword: str, ctx: int = 40) -> list[str]:
     return snippets
 
 
-def search_content(query: str, limit: int = 200) -> list[dict]:
+def search_content(query: str, limit: int = 200,
+                   include_annotations: bool = False) -> list[dict]:
     """
     Run an FTS5 MATCH query and return results with contextual snippets.
 
     The query is sanitized to prevent FTS5 syntax injection.
 
-    Each result dict contains: file_id, page_num, snippet, snippets,
-    filename, dynasty, category, author.
+    When *include_annotations* is False (default), only 正文 (body) rows
+    are returned.  When True, both body and annotation rows are returned.
+
+    Each result dict contains: file_id, page_num, content_type, snippet,
+    snippets, filename, dynasty, category, author.
     """
     safe_query = _sanitize_fts5_query(query)
     # Strip FTS5 special chars to get the raw keyword for in-text search
     raw_keyword = _FTS5_SPECIAL.sub(" ", query).strip()
+
+    type_filter = "" if include_annotations else "AND c.content_type = 'body'"
+
     with get_db() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 c.file_id,
                 c.page_num,
+                c.content_type,
                 c.content,
-                snippet(content_fts, 2, '【', '】', '…', 30) AS snippet,
+                snippet(content_fts, 3, '【', '】', '…', 30) AS snippet,
                 f.filename,
                 f.dynasty,
                 f.category,
@@ -377,6 +423,7 @@ def search_content(query: str, limit: int = 200) -> list[dict]:
             FROM content_fts c
             JOIN files f ON f.id = CAST(c.file_id AS INTEGER)
             WHERE content_fts MATCH ?
+            {type_filter}
             ORDER BY rank
             LIMIT ?
             """,

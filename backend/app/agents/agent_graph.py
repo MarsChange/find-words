@@ -44,6 +44,7 @@ class AgentState(_AgentStateRequired, total=False):
     """Shared state flowing through the agent graph."""
     traditional_query: str
     use_cbeta: bool
+    include_annotations: bool
     local_hits: Annotated[list[dict], operator.add]
     cbeta_hits: Annotated[list[dict], operator.add]
     all_hits: Annotated[list[dict], operator.add]
@@ -67,16 +68,17 @@ def local_searcher(state: AgentState) -> dict:
     query = state.get("traditional_query", state["original_query"])
     # Also search the original (simplified) form
     original = state["original_query"]
+    include_annotations = state.get("include_annotations", False)
 
-    hits = search_content(query)
+    hits = search_content(query, include_annotations=include_annotations)
     if original != query:
-        hits.extend(search_content(original))
+        hits.extend(search_content(original, include_annotations=include_annotations))
 
-    # Deduplicate by (file_id, page_num)
+    # Deduplicate by (file_id, page_num, content_type)
     seen = set()
     unique: list[dict] = []
     for h in hits:
-        key = (h.get("file_id"), h.get("page_num"))
+        key = (h.get("file_id"), h.get("page_num"), h.get("content_type", "body"))
         if key not in seen:
             seen.add(key)
             unique.append(h)
@@ -135,10 +137,7 @@ def synthesizer(state: AgentState) -> dict:
     if cfg.settings.llm_provider_api_key and all_hits:
         try:
             client = _get_client()
-            excerpts = "\n".join(
-                f"- [{h.get('source')}] {h.get('filename', '')}: {h.get('snippet', '')}"
-                for h in all_hits[:20]
-            )
+            excerpts = "\n".join(_format_excerpt(h) for h in all_hits[:20])
             messages: list = [
                 {"role": "system", "content": (
                     "你是一位汉语言古籍研究助手。目前用户检索相应的词语文语料，得到了以下检索结果，"
@@ -189,10 +188,7 @@ def synthesizer_streaming(state: AgentState, on_chunk=None):
     if cfg.settings.llm_provider_api_key and all_hits:
         try:
             client = _get_client()
-            excerpts = "\n".join(
-                f"- [{h.get('source')}] {h.get('filename', '')}: {h.get('snippet', '')}"
-                for h in all_hits[:20]
-            )
+            excerpts = "\n".join(_format_excerpt(h) for h in all_hits[:20])
             messages: list = [
                 {"role": "system", "content": (
                     "你是一位汉语言古籍研究助手。目前用户检索相应的词语文语料，得到了以下检索结果，"
@@ -241,10 +237,7 @@ def chat_agent(state: AgentState) -> dict:
         h.setdefault("source", "local")
 
     all_hits = local + cbeta
-    excerpts = "\n".join(
-                f"- [{h.get('source')}] {h.get('filename', '')}: {h.get('snippet', '')}"
-                for h in all_hits[:20]
-            )
+    excerpts = "\n".join(_format_excerpt(h) for h in all_hits[:20])
     try:
         client = _get_client()
         messages: list = [
@@ -274,6 +267,18 @@ def chat_agent(state: AgentState) -> dict:
 
 
 # ── Helper ───────────────────────────────────────────────────────────────────
+
+def _format_excerpt(h: dict) -> str:
+    """Format a single hit as a labelled excerpt line for LLM context."""
+    source = h.get("source", "local")
+    if source == "local":
+        content_type = h.get("content_type", "body")
+        label = "正文" if content_type == "body" else "注文"
+        tag = f"[local/{label}]"
+    else:
+        tag = f"[{source}]"
+    return f"- {tag} {h.get('filename', '')}: {h.get('snippet', '')}"
+
 
 def _get_client():
     """Create an OpenAI-compatible client from current settings.
@@ -359,12 +364,14 @@ def _get_chat_graph():
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
-def run_search(query: str, use_cbeta: bool = False) -> dict:
+def run_search(query: str, use_cbeta: bool = False,
+               include_annotations: bool = False) -> dict:
     """Execute the full search pipeline and return results."""
     state: AgentState = {
         "original_query": query,
         "traditional_query": "",
         "use_cbeta": use_cbeta,
+        "include_annotations": include_annotations,
         "local_hits": [],
         "cbeta_hits": [],
         "all_hits": [],
@@ -398,14 +405,17 @@ def run_chat(message: str, history: list[dict],
     return result.get("chat_reply", "")
 
 
-def run_search_streaming(query: str, use_cbeta: bool = False, on_chunk=None) -> dict:
+def run_search_streaming(query: str, use_cbeta: bool = False,
+                         include_annotations: bool = False,
+                         on_chunk=None) -> dict:
     """Execute the search pipeline with streaming synthesis.
-    
+
     Args:
         query: Search query
         use_cbeta: Whether to search CBETA
+        include_annotations: Whether to include annotation content in results
         on_chunk: Optional callback(chunk_text: str) for streaming synthesis
-    
+
     Returns:
         dict with all_hits, synthesis, traditional_query
     """
@@ -414,6 +424,7 @@ def run_search_streaming(query: str, use_cbeta: bool = False, on_chunk=None) -> 
         "original_query": query,
         "traditional_query": "",
         "use_cbeta": use_cbeta,
+        "include_annotations": include_annotations,
         "local_hits": [],
         "cbeta_hits": [],
         "all_hits": [],
@@ -474,11 +485,8 @@ def run_chat_streaming(message: str, history: list[dict],
         h.setdefault("source", "local")
     all_hits = local + cbeta
     
-    excerpts = "\n".join(
-        f"- [{h.get('source')}] {h.get('filename', '')}: {h.get('snippet', '')}"
-        for h in all_hits[:20]
-    )
-    
+    excerpts = "\n".join(_format_excerpt(h) for h in all_hits[:20])
+
     # Build system prompt with synthesis context if available
     system_content = (
         "你是一位汉语言古籍研究助手。目前用户检索相应的词语文语料，得到了以下检索结果，"

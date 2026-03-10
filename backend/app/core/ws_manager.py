@@ -73,6 +73,7 @@ async def _handle_search_stream(websocket: WebSocket, data: dict) -> None:
     
     query = data.get("query", "")
     use_cbeta = data.get("use_cbeta", False)
+    include_annotations = data.get("include_annotations", False)
     session_id = data.get("session_id")
     
     if not query or len(query) > 200:
@@ -96,6 +97,7 @@ async def _handle_search_stream(websocket: WebSocket, data: dict) -> None:
             run_search_streaming,
             query=query,
             use_cbeta=use_cbeta,
+            include_annotations=include_annotations,
             on_chunk=lambda chunk: asyncio.run_coroutine_threadsafe(on_chunk(chunk), _main_loop) if _main_loop else None
         )
         

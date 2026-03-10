@@ -47,14 +47,16 @@ async def update_settings(req: LLMSettingsRequest) -> LLMSettingsResponse:
 
 @router.get("/app", response_model=AppSettingsResponse)
 async def get_app_settings() -> AppSettingsResponse:
-    """Return application-level settings (CBETA max results, etc.)."""
+    """Return application-level settings (CBETA max results, OCR model, etc.)."""
     val = get_setting("cbeta_max_results")
     cbeta_max = int(val) if val else 20
     thinking_val = get_setting("enable_thinking")
     enable_thinking = thinking_val == "true"
+    ocr_model = get_setting("ocr_model") or "qwen3.5-plus"
     return AppSettingsResponse(
         cbeta_max_results=cbeta_max,
         enable_thinking=enable_thinking,
+        ocr_model=ocr_model,
     )
 
 
@@ -65,11 +67,15 @@ async def update_app_settings(req: AppSettingsUpdateRequest) -> AppSettingsRespo
         set_setting("cbeta_max_results", str(req.cbeta_max_results))
     if req.enable_thinking is not None:
         set_setting("enable_thinking", "true" if req.enable_thinking else "false")
+    if req.ocr_model is not None:
+        set_setting("ocr_model", req.ocr_model)
     val = get_setting("cbeta_max_results")
     cbeta_max = int(val) if val else 20
     thinking_val = get_setting("enable_thinking")
     enable_thinking = thinking_val == "true"
+    ocr_model = get_setting("ocr_model") or "qwen3.5-plus"
     return AppSettingsResponse(
         cbeta_max_results=cbeta_max,
         enable_thinking=enable_thinking,
+        ocr_model=ocr_model,
     )

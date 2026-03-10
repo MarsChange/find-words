@@ -31,6 +31,7 @@ export interface SearchResultItem {
   dynasty: string;
   category: string;
   author: string;
+  content_type?: string;
 }
 
 export interface SearchResponse {
@@ -204,12 +205,14 @@ export function updateSettings(settings: LLMSettings): Promise<LLMSettings> {
 export interface AppSettings {
   cbeta_max_results: number;
   enable_thinking: boolean;
+  ocr_model: string;
 }
 
 export function getAppSettings(): Promise<AppSettings> {
   return api.get('/settings/app').then((r) => ({
     cbeta_max_results: r.data.cbeta_max_results ?? 20,
     enable_thinking: r.data.enable_thinking ?? false,
+    ocr_model: r.data.ocr_model ?? 'qwen3.5-plus',
   }));
 }
 
@@ -219,6 +222,7 @@ export function updateAppSettings(settings: Partial<AppSettings>): Promise<AppSe
     .then((r) => ({
       cbeta_max_results: r.data.cbeta_max_results ?? 20,
       enable_thinking: r.data.enable_thinking ?? false,
+      ocr_model: r.data.ocr_model ?? 'qwen3.5-plus',
     }));
 }
 
