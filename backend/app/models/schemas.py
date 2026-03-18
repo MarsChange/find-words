@@ -39,7 +39,6 @@ class FileUpdateRequest(BaseModel):
 class SearchRequest(BaseModel):
     query: str = Field(..., min_length=1, max_length=200)
     use_cbeta: bool = False
-    include_annotations: bool = False
     session_id: Optional[int] = None
 
 
@@ -48,9 +47,11 @@ class SearchHit(BaseModel):
     file_id: Optional[int] = None
     filename: Optional[str] = None
     page_num: Optional[int] = None
-    content_type: str = "body"
     snippet: str
     snippets: list[str] = []
+    keyword_sentence: str = ""
+    is_original_text: bool = False
+    content_label: str = ""
     dynasty: str = ""
     category: str = ""
     author: str = ""
@@ -144,6 +145,9 @@ class SearchResultResponse(BaseModel):
     page_num: Optional[int] = None
     snippet: str = ""
     snippets: list[str] = []
+    keyword_sentence: str = ""
+    is_original_text: bool = False
+    content_label: str = ""
     dynasty: str = ""
     category: str = ""
     author: str = ""

@@ -24,15 +24,30 @@ _DB_BATCH_SIZE = 50
 
 # DashScope VLM configuration
 _DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+_OCR_MAX_ATTEMPTS_WHEN_EMPTY_TEXT = 2
 
 _VLM_PROMPT = (
-    "以上图片为竖排繁体中文古籍，图中的大号加粗字体为古籍正文，"
-    "小号字体为注文，我需要将正文和注文作隔断区分。"
-    "请为我OCR该图片，区分正文与注文，并严格以如下JSON格式输出：\n"
-    '{"正文": "此处放正文内容", "注文": "此处放注文内容"}\n'
-    "要求：1.仅输出JSON，不要输出任何其他内容。"
-    "2.若该页无注文，则注文字段输出空字符串。"
-    "3.若该页无正文，则正文字段输出空字符串。"
+"""
+你是“古籍OCR转写助手”。
+
+任务：
+请对输入的竖排繁体中文古籍页面进行高精度OCR转写。
+
+要求：
+1. 页面阅读顺序为：自右向左逐列，每列自上而下。
+2. 必须输出页面中全部可辨认文字与符号，不得遗漏：
+   - 大字正文
+   - 小字注文/夹注/边注
+   - 标点、引号、圈点、书名号等符号
+   - 页码、版心、题头等可辨认文字
+3. 只做转写，不做解释，不做改写，不做现代化替换。
+4. 保留繁体字形与原文用字。
+
+输出格式：
+- 严格只输出 JSON，不要输出任何解释或 markdown。
+- JSON 格式固定为：{"text":"此处放整页按阅读顺序拼接的转写文本"}
+- 若无法识别到文字，则输出：{"text":""}
+"""
 )
 
 
@@ -54,36 +69,24 @@ def _get_ocr_model() -> str:
     return model or "qwen3.5-plus"
 
 
-def _parse_vlm_response(text: str) -> tuple[str, str]:
-    """Extract 正文 (body) and 注文 (annotation) from VLM JSON response.
-
-    Returns (body_text, annotation_text). Either may be empty.
-    """
-    # Strip markdown code fences if present (e.g. ```json ... ```)
+def _parse_vlm_response(text: str) -> str:
+    """Extract OCR full-page text from VLM JSON response."""
     cleaned = text.strip()
     if cleaned.startswith("```"):
         lines = cleaned.splitlines()
-        # Remove first line (```json) and last line (```)
         lines = [l for l in lines if not l.strip().startswith("```")]
         cleaned = "\n".join(lines).strip()
 
     try:
         data = json.loads(cleaned)
-        body = str(data.get("正文", "")).strip()
-        annotation = str(data.get("注文", "")).strip()
-        return body, annotation
+        return str(data.get("text", "")).strip()
     except (json.JSONDecodeError, AttributeError):
         logger.warning("VLM response is not valid JSON, falling back to raw text")
-
-    # Fallback: treat whole response as body
-    return text.strip(), ""
+        return text.strip()
 
 
-def _ocr_page_vlm(img_bytes: bytes, model: str, api_key: str) -> tuple[str, str]:
-    """Send a page image to DashScope VLM and return (body, annotation).
-
-    Uses the OpenAI-compatible SDK.
-    """
+def _ocr_page_vlm(img_bytes: bytes, model: str, api_key: str) -> str:
+    """Send a page image to DashScope VLM and return full-page text."""
     from openai import OpenAI
 
     client = OpenAI(
@@ -107,35 +110,53 @@ def _ocr_page_vlm(img_bytes: bytes, model: str, api_key: str) -> tuple[str, str]
     return _parse_vlm_response(response_text)
 
 
+def _ocr_page_with_retry(
+    img_bytes: bytes,
+    model: str,
+    api_key: str,
+    page_num: int,
+) -> str:
+    """OCR with retry when text is empty."""
+    last_text = ""
+
+    for attempt in range(1, _OCR_MAX_ATTEMPTS_WHEN_EMPTY_TEXT + 1):
+        text = _ocr_page_vlm(img_bytes, model, api_key)
+        last_text = text
+
+        if text.strip():
+            if attempt > 1:
+                logger.info(
+                    "Page %d OCR text recovered on attempt %d/%d",
+                    page_num,
+                    attempt,
+                    _OCR_MAX_ATTEMPTS_WHEN_EMPTY_TEXT,
+                )
+            return text
+
+        if attempt < _OCR_MAX_ATTEMPTS_WHEN_EMPTY_TEXT:
+            logger.warning(
+                "Page %d OCR text is empty on attempt %d/%d, retrying...",
+                page_num,
+                attempt,
+                _OCR_MAX_ATTEMPTS_WHEN_EMPTY_TEXT,
+            )
+
+    logger.warning(
+        "Page %d OCR text is still empty after %d attempts",
+        page_num,
+        _OCR_MAX_ATTEMPTS_WHEN_EMPTY_TEXT,
+    )
+    return last_text
+
+
 def extract_text_from_pdf(
     filepath: str,
     progress_callback: Callable[[int, int], None] | None = None,
-) -> list[tuple[int, str, str]]:
-    """
-    Extract text from every page of a PDF file.
-
-    1. Fast pre-scan (single-threaded): extract text-layer pages and
-       identify image-only pages needing OCR.
-    2. Parallel VLM OCR via ThreadPoolExecutor for image-only pages.
-
-    Returns a list of (page_number, body_text, annotation_text) tuples
-    (1-indexed pages).  For text-layer pages, annotation_text is empty.
-    """
-    text_pages: list[tuple[int, str, str]] = []
-    ocr_page_indices: list[int] = []
-
+) -> list[tuple[int, str]]:
+    """Extract full-page OCR text from every page using VLM."""
     try:
         with fitz.open(filepath) as doc:
             total_pages = doc.page_count
-
-            # Pre-scan: extract text pages & identify OCR pages
-            for i, page in enumerate(doc):
-                text = page.get_text().strip()
-                if text:
-                    text_pages.append((i + 1, text, ""))
-                else:
-                    ocr_page_indices.append(i)
-
     except fitz.FileDataError:
         logger.error("PDF file is corrupted or encrypted: %s", filepath)
         raise ValueError(f"Cannot read PDF: {filepath}")
@@ -143,66 +164,65 @@ def extract_text_from_pdf(
         logger.exception("Unexpected error processing PDF: %s", filepath)
         raise
 
-    text_count = len(text_pages)
-
-    # Report text pages as already done
     if progress_callback:
-        progress_callback(text_count, total_pages)
+        progress_callback(0, total_pages)
 
-    # Parallel VLM OCR for image-only pages
-    if ocr_page_indices:
-        api_key = _get_api_key()
-        if not api_key:
-            logger.warning(
-                "No DashScope API key configured; skipping OCR for %d scanned pages",
-                len(ocr_page_indices),
-            )
-            text_pages.sort(key=lambda x: x[0])
-            return text_pages
-
-        model = _get_ocr_model()
-
-        # Render all OCR pages to PNG bytes first
-        page_images: dict[int, bytes] = {}
-        with fitz.open(filepath) as doc:
-            for idx in ocr_page_indices:
-                page = doc[idx]
-                pix = page.get_pixmap(dpi=300)
-                page_images[idx] = pix.tobytes("png")
-
-        num_workers = min(8, len(ocr_page_indices))
-        logger.info(
-            "Parallel VLM OCR: %d pages, %d threads, model=%s",
-            len(ocr_page_indices), num_workers, model,
+    api_key = _get_api_key()
+    if not api_key:
+        logger.warning(
+            "No DashScope API key configured; skipping VLM OCR for all %d pages",
+            total_pages,
         )
+        return []
 
-        completed = 0
+    model = _get_ocr_model()
 
-        def _ocr_one(page_idx: int) -> tuple[int, str, str]:
-            img_bytes = page_images[page_idx]
-            body, annotation = _ocr_page_vlm(img_bytes, model, api_key)
-            return (page_idx + 1, body, annotation)
+    page_images: dict[int, bytes] = {}
+    with fitz.open(filepath) as doc:
+        for i in range(total_pages):
+            page = doc[i]
+            pix = page.get_pixmap(dpi=400)
+            page_images[i] = pix.tobytes("png")
 
-        with ThreadPoolExecutor(max_workers=num_workers) as pool:
-            future_to_idx = {
-                pool.submit(_ocr_one, idx): idx
-                for idx in ocr_page_indices
-            }
-            for future in as_completed(future_to_idx):
-                page_idx = future_to_idx[future]
-                try:
-                    page_num, body, annotation = future.result()
-                    if body or annotation:
-                        text_pages.append((page_num, body, annotation))
-                except Exception:
-                    logger.warning(
-                        "VLM OCR failed for page %d", page_idx + 1,
-                        exc_info=True,
-                    )
+    num_workers = min(8, total_pages)
+    logger.info(
+        "Parallel VLM OCR: %d pages, %d threads, model=%s",
+        total_pages, num_workers, model,
+    )
 
-                completed += 1
-                if progress_callback:
-                    progress_callback(text_count + completed, total_pages)
+    text_pages: list[tuple[int, str]] = []
+    completed = 0
+
+    def _ocr_one(page_idx: int) -> tuple[int, str]:
+        img_bytes = page_images[page_idx]
+        text = _ocr_page_with_retry(
+            img_bytes=img_bytes,
+            model=model,
+            api_key=api_key,
+            page_num=page_idx + 1,
+        )
+        return page_idx + 1, text
+
+    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        future_to_idx = {
+            pool.submit(_ocr_one, idx): idx
+            for idx in range(total_pages)
+        }
+        for future in as_completed(future_to_idx):
+            page_idx = future_to_idx[future]
+            try:
+                page_num, text = future.result()
+                if text:
+                    text_pages.append((page_num, text))
+            except Exception:
+                logger.warning(
+                    "VLM OCR failed for page %d", page_idx + 1,
+                    exc_info=True,
+                )
+
+            completed += 1
+            if progress_callback:
+                progress_callback(completed, total_pages)
 
     text_pages.sort(key=lambda x: x[0])
     return text_pages
@@ -225,14 +245,7 @@ def process_pdf_background(
     filepath: str,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> threading.Thread:
-    """
-    Process a PDF in a background thread.
-
-    Extracts text page-by-page (with parallel VLM OCR for scanned pages),
-    indexes into FTS5 in batches (body and annotation separately),
-    and updates the file status when done.
-    Progress is broadcast via WebSocket to all connected clients.
-    """
+    """Process a PDF in a background thread and index page text."""
     if progress_callback is None:
         progress_callback = _make_ws_progress_callback(file_id)
 
@@ -240,12 +253,10 @@ def process_pdf_background(
         try:
             pages = extract_text_from_pdf(filepath, progress_callback)
             total = len(pages)
-            batch: list[tuple[int, int, str, str]] = []
-            for page_num, body, annotation in pages:
-                if body:
-                    batch.append((file_id, page_num, body, "body"))
-                if annotation:
-                    batch.append((file_id, page_num, annotation, "annotation"))
+            batch: list[tuple[int, int, str]] = []
+            for page_num, text in pages:
+                if text:
+                    batch.append((file_id, page_num, text))
                 if len(batch) >= _DB_BATCH_SIZE:
                     index_pages_batch(batch)
                     batch.clear()

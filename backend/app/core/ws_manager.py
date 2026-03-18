@@ -26,6 +26,16 @@ _ALLOWED_ORIGINS = {
 }
 
 
+async def _safe_send_json(websocket: WebSocket, payload: dict[str, Any]) -> bool:
+    """Best-effort websocket send that won't raise on closed connections."""
+    try:
+        await websocket.send_json(payload)
+        return True
+    except Exception:
+        logger.debug("WebSocket send skipped (connection closed): %s", payload.get("type"))
+        return False
+
+
 async def ws_endpoint(websocket: WebSocket) -> None:
     """Handle a WebSocket connection: accept, track, process messages."""
     global _main_loop
@@ -73,20 +83,19 @@ async def _handle_search_stream(websocket: WebSocket, data: dict) -> None:
     
     query = data.get("query", "")
     use_cbeta = data.get("use_cbeta", False)
-    include_annotations = data.get("include_annotations", False)
     session_id = data.get("session_id")
     
     if not query or len(query) > 200:
-        await websocket.send_json({"type": "search_error", "error": "Query is required (max 200 chars)"})
+        await _safe_send_json(websocket, {"type": "search_error", "error": "Query is required (max 200 chars)"})
         return
     
     try:
         # Send search started event
-        await websocket.send_json({"type": "search_started", "query": query})
+        await _safe_send_json(websocket, {"type": "search_started", "query": query})
         
         # Define chunk callback for streaming synthesis
         async def on_chunk(chunk: str):
-            await websocket.send_json({
+            await _safe_send_json(websocket, {
                 "type": "synthesis_chunk",
                 "chunk": chunk,
                 "session_id": session_id,
@@ -97,22 +106,25 @@ async def _handle_search_stream(websocket: WebSocket, data: dict) -> None:
             run_search_streaming,
             query=query,
             use_cbeta=use_cbeta,
-            include_annotations=include_annotations,
             on_chunk=lambda chunk: asyncio.run_coroutine_threadsafe(on_chunk(chunk), _main_loop) if _main_loop else None
         )
         
         # Store results in database if session_id provided
         if session_id:
             all_hits = result.get("all_hits", [])
-            await asyncio.to_thread(insert_search_results, session_id, all_hits)
             traditional_query = result.get("traditional_query", query)
-            await asyncio.to_thread(update_session_traditional_keyword, session_id, traditional_query)
             synthesis_text = result.get("synthesis", "")
-            if synthesis_text:
-                await asyncio.to_thread(update_session_synthesis, session_id, synthesis_text)
+            try:
+                await asyncio.to_thread(insert_search_results, session_id, all_hits)
+                await asyncio.to_thread(update_session_traditional_keyword, session_id, traditional_query)
+                if synthesis_text:
+                    await asyncio.to_thread(update_session_synthesis, session_id, synthesis_text)
+            except Exception:
+                # Persistence failure should not break the search response.
+                logger.exception("Failed to persist search stream result (session_id=%s)", session_id)
         
         # Send completion event with all hits
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": "search_complete",
             "session_id": session_id,
             "traditional_query": result.get("traditional_query", query),
@@ -122,7 +134,7 @@ async def _handle_search_stream(websocket: WebSocket, data: dict) -> None:
         
     except Exception:
         logger.exception("Search stream failed")
-        await websocket.send_json({"type": "search_error", "error": "Search failed"})
+        await _safe_send_json(websocket, {"type": "search_error", "error": "Search failed"})
 
 
 async def _handle_chat_stream(websocket: WebSocket, data: dict) -> None:
@@ -136,7 +148,7 @@ async def _handle_chat_stream(websocket: WebSocket, data: dict) -> None:
     synthesis = data.get("synthesis", "")
     
     if not message or len(message) > 10000:
-        await websocket.send_json({"type": "chat_error", "error": "Message is required (max 10000 chars)"})
+        await _safe_send_json(websocket, {"type": "chat_error", "error": "Message is required (max 10000 chars)"})
         return
     
     # Validate session if provided
@@ -144,7 +156,7 @@ async def _handle_chat_stream(websocket: WebSocket, data: dict) -> None:
         try:
             session = await asyncio.to_thread(get_session_by_id, session_id)
             if not session:
-                await websocket.send_json({"type": "chat_error", "error": "Session not found"})
+                await _safe_send_json(websocket, {"type": "chat_error", "error": "Session not found"})
                 return
             # Store user message
             await asyncio.to_thread(add_message, session_id, "user", message)
@@ -153,11 +165,11 @@ async def _handle_chat_stream(websocket: WebSocket, data: dict) -> None:
     
     try:
         # Send chat started event
-        await websocket.send_json({"type": "chat_started", "session_id": session_id})
+        await _safe_send_json(websocket, {"type": "chat_started", "session_id": session_id})
         
         # Define chunk callback for streaming
         async def on_chunk(chunk: str):
-            await websocket.send_json({
+            await _safe_send_json(websocket, {
                 "type": "chat_chunk",
                 "chunk": chunk,
                 "session_id": session_id,
@@ -178,7 +190,7 @@ async def _handle_chat_stream(websocket: WebSocket, data: dict) -> None:
             await asyncio.to_thread(add_message, session_id, "assistant", reply)
         
         # Send completion event
-        await websocket.send_json({
+        await _safe_send_json(websocket, {
             "type": "chat_complete",
             "session_id": session_id,
             "reply": reply,
@@ -186,7 +198,7 @@ async def _handle_chat_stream(websocket: WebSocket, data: dict) -> None:
         
     except Exception:
         logger.exception("Chat stream failed")
-        await websocket.send_json({"type": "chat_error", "error": "Chat failed"})
+        await _safe_send_json(websocket, {"type": "chat_error", "error": "Chat failed"})
 
 
 async def _broadcast(data: dict[str, Any]) -> None:

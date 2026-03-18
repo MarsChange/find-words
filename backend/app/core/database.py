@@ -1,6 +1,7 @@
 """SQLite + FTS5 full-text search engine for classical text content."""
 
 import json
+import logging
 import re
 import sqlite3
 import threading
@@ -11,6 +12,7 @@ from typing import Generator
 from app.config import settings
 
 _local = threading.local()
+logger = logging.getLogger(__name__)
 
 # CJK Unicode ranges — used to insert spaces so each character becomes
 # an individual FTS5 token, enabling substring matching on Chinese text.
@@ -68,17 +70,17 @@ def get_db() -> Generator[sqlite3.Connection, None, None]:
         raise
 
 
-def _fts_has_content_type(conn: sqlite3.Connection) -> bool:
-    """Check whether the content_fts table already has a content_type column."""
+def _get_fts_table_sql(conn: sqlite3.Connection) -> str | None:
+    """Return CREATE SQL of content_fts table if exists."""
     try:
         row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='content_fts'"
         ).fetchone()
-        if row and "content_type" in row["sql"]:
-            return True
+        if row and row["sql"]:
+            return str(row["sql"])
     except Exception:
         pass
-    return False
+    return None
 
 
 def init_db() -> None:
@@ -122,6 +124,9 @@ def init_db() -> None:
                 filename   TEXT    DEFAULT '',
                 page_num   INTEGER,
                 snippet    TEXT    DEFAULT '',
+                keyword_sentence TEXT DEFAULT '',
+                is_original_text INTEGER DEFAULT 0,
+                content_label TEXT DEFAULT '',
                 dynasty    TEXT    DEFAULT '',
                 category   TEXT    DEFAULT '',
                 author     TEXT    DEFAULT '',
@@ -141,30 +146,26 @@ def init_db() -> None:
             """
         )
 
-        # Migrate FTS5 table: add content_type column if missing.
-        # FTS5 virtual tables cannot be ALTERed, so we must recreate.
-        if not _fts_has_content_type(conn):
-            # Check if the old table exists at all
-            old_exists = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='content_fts'"
-            ).fetchone()
-            if old_exists:
-                # Migrate: copy data, drop old, create new with content_type
-                conn.execute(
-                    "CREATE VIRTUAL TABLE IF NOT EXISTS content_fts_new USING fts5("
-                    "file_id, page_num, content_type, content, tokenize='unicode61')"
-                )
-                conn.execute(
-                    "INSERT INTO content_fts_new (file_id, page_num, content_type, content) "
-                    "SELECT file_id, page_num, 'body', content FROM content_fts"
-                )
-                conn.execute("DROP TABLE content_fts")
-                conn.execute("ALTER TABLE content_fts_new RENAME TO content_fts")
-            else:
-                conn.execute(
-                    "CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5("
-                    "file_id, page_num, content_type, content, tokenize='unicode61')"
-                )
+        # Keep a single content field per page.
+        # If old schema has content_type, recreate and merge rows by page.
+        fts_sql = _get_fts_table_sql(conn)
+        if fts_sql is None:
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5("
+                "file_id, page_num, content, tokenize='unicode61')"
+            )
+        elif "content_type" in fts_sql:
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS content_fts_new USING fts5("
+                "file_id, page_num, content, tokenize='unicode61')"
+            )
+            conn.execute(
+                "INSERT INTO content_fts_new (file_id, page_num, content) "
+                "SELECT file_id, page_num, group_concat(content, ' ') "
+                "FROM content_fts GROUP BY file_id, page_num"
+            )
+            conn.execute("DROP TABLE content_fts")
+            conn.execute("ALTER TABLE content_fts_new RENAME TO content_fts")
 
         # Migrate existing databases: add traditional_keyword column if missing
         try:
@@ -191,6 +192,27 @@ def init_db() -> None:
         try:
             conn.execute(
                 "ALTER TABLE search_results ADD COLUMN category TEXT DEFAULT ''"
+            )
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        # Migrate existing databases: add keyword_sentence column if missing
+        try:
+            conn.execute(
+                "ALTER TABLE search_results ADD COLUMN keyword_sentence TEXT DEFAULT ''"
+            )
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        # Migrate existing databases: add is_original_text column if missing
+        try:
+            conn.execute(
+                "ALTER TABLE search_results ADD COLUMN is_original_text INTEGER DEFAULT 0"
+            )
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        # Migrate existing databases: add content_label column if missing
+        try:
+            conn.execute(
+                "ALTER TABLE search_results ADD COLUMN content_label TEXT DEFAULT ''"
             )
         except sqlite3.OperationalError:
             pass  # Column already exists
@@ -314,28 +336,23 @@ def clear_file_content(file_id: int) -> None:
 
 # ── Content indexing ─────────────────────────────────────────────────────────
 
-def index_page(file_id: int, page_num: int, content: str,
-               content_type: str = "body") -> None:
-    """Insert a single page's text into the FTS5 index.
-
-    Args:
-        content_type: 'body' for 正文, 'annotation' for 注文.
-    """
+def index_page(file_id: int, page_num: int, content: str) -> None:
+    """Insert a single page's text into the FTS5 index."""
     with get_db() as conn:
         conn.execute(
-            "INSERT INTO content_fts (file_id, page_num, content_type, content) "
-            "VALUES (?, ?, ?, ?)",
-            (str(file_id), str(page_num), content_type, _tokenize_cjk(content)),
+            "INSERT INTO content_fts (file_id, page_num, content) "
+            "VALUES (?, ?, ?)",
+            (str(file_id), str(page_num), _tokenize_cjk(content)),
         )
 
 
-def index_pages_batch(rows: list[tuple[int, int, str, str]]) -> None:
-    """Batch-insert multiple (file_id, page_num, content, content_type) rows."""
+def index_pages_batch(rows: list[tuple[int, int, str]]) -> None:
+    """Batch-insert multiple (file_id, page_num, content) rows."""
     with get_db() as conn:
         conn.executemany(
-            "INSERT INTO content_fts (file_id, page_num, content_type, content) "
-            "VALUES (?, ?, ?, ?)",
-            [(str(fid), str(pn), ct, _tokenize_cjk(c)) for fid, pn, c, ct in rows],
+            "INSERT INTO content_fts (file_id, page_num, content) "
+            "VALUES (?, ?, ?)",
+            [(str(fid), str(pn), _tokenize_cjk(c)) for fid, pn, c in rows],
         )
 
 
@@ -388,24 +405,85 @@ def _extract_snippets(content: str, keyword: str, ctx: int = 40) -> list[str]:
     return snippets
 
 
-def search_content(query: str, limit: int = 200,
-                   include_annotations: bool = False) -> list[dict]:
+def _extract_sentence_for_keyword(content: str, keyword: str) -> str:
+    """Extract the sentence containing the first keyword occurrence."""
+    clean = _CJK_SPACE_RE.sub("", content)
+    target = _CJK_SPACE_RE.sub("", keyword)
+    if not target:
+        return ""
+
+    idx = clean.find(target)
+    if idx == -1:
+        return ""
+
+    boundaries = "。！？；\n"
+    start = idx
+    while start > 0 and clean[start - 1] not in boundaries:
+        start -= 1
+
+    end = idx + len(target)
+    while end < len(clean) and clean[end] not in boundaries:
+        end += 1
+    if end < len(clean):
+        end += 1
+
+    return clean[start:end].strip()
+
+
+def _extract_occurrence_items(
+    content: str,
+    keyword: str,
+    ctx: int = 40,
+) -> list[tuple[str, str]]:
+    """Extract (snippet, sentence) for every keyword occurrence in content."""
+    clean = _CJK_SPACE_RE.sub("", content)
+    target = _CJK_SPACE_RE.sub("", keyword)
+    if not target:
+        return []
+
+    boundaries = "。！？；\n"
+    items: list[tuple[str, str]] = []
+    start = 0
+    while True:
+        idx = clean.find(target, start)
+        if idx == -1:
+            break
+
+        lo = max(0, idx - ctx)
+        hi = min(len(clean), idx + len(target) + ctx)
+        prefix = "…" if lo > 0 else ""
+        suffix = "…" if hi < len(clean) else ""
+        snippet = prefix + clean[lo:hi] + suffix
+
+        sent_start = idx
+        while sent_start > 0 and clean[sent_start - 1] not in boundaries:
+            sent_start -= 1
+
+        sent_end = idx + len(target)
+        while sent_end < len(clean) and clean[sent_end] not in boundaries:
+            sent_end += 1
+        if sent_end < len(clean):
+            sent_end += 1
+
+        sentence = clean[sent_start:sent_end].strip()
+        items.append((snippet, sentence))
+        start = idx + 1
+
+    return items
+
+
+def search_content(query: str, limit: int = 200) -> list[dict]:
     """
     Run an FTS5 MATCH query and return results with contextual snippets.
 
     The query is sanitized to prevent FTS5 syntax injection.
 
-    When *include_annotations* is False (default), only 正文 (body) rows
-    are returned.  When True, both body and annotation rows are returned.
-
-    Each result dict contains: file_id, page_num, content_type, snippet,
+    Each result dict contains: file_id, page_num, snippet,
     snippets, filename, dynasty, category, author.
     """
     safe_query = _sanitize_fts5_query(query)
     # Strip FTS5 special chars to get the raw keyword for in-text search
     raw_keyword = _FTS5_SPECIAL.sub(" ", query).strip()
-
-    type_filter = "" if include_annotations else "AND c.content_type = 'body'"
 
     with get_db() as conn:
         rows = conn.execute(
@@ -413,9 +491,8 @@ def search_content(query: str, limit: int = 200,
             SELECT
                 c.file_id,
                 c.page_num,
-                c.content_type,
                 c.content,
-                snippet(content_fts, 3, '【', '】', '…', 30) AS snippet,
+                snippet(content_fts, 2, '【', '】', '…', 30) AS snippet,
                 f.filename,
                 f.dynasty,
                 f.category,
@@ -423,20 +500,34 @@ def search_content(query: str, limit: int = 200,
             FROM content_fts c
             JOIN files f ON f.id = CAST(c.file_id AS INTEGER)
             WHERE content_fts MATCH ?
-            {type_filter}
             ORDER BY rank
             LIMIT ?
             """,
             (safe_query, limit),
         ).fetchall()
-        results = []
+        results: list[dict] = []
         for r in rows:
             d = dict(r)
             content = d.pop("content", "")
-            d["snippet"] = _clean_snippet(d.get("snippet", ""))
-            # Extract all keyword occurrences within the page
-            d["snippets"] = _extract_snippets(content, raw_keyword) or [d["snippet"]]
-            results.append(d)
+            db_snippet = _clean_snippet(d.get("snippet", ""))
+            occurrences = _extract_occurrence_items(content, raw_keyword)
+
+            # Split local hits by occurrence so multiple matches on the same page
+            # become multiple entries.
+            if occurrences:
+                for snippet, sentence in occurrences:
+                    row_item = dict(d)
+                    row_item["snippet"] = snippet
+                    row_item["snippets"] = [snippet]
+                    row_item["keyword_sentence"] = sentence
+                    results.append(row_item)
+            else:
+                d["snippet"] = db_snippet
+                d["snippets"] = [db_snippet] if db_snippet else []
+                d["keyword_sentence"] = (
+                    _extract_sentence_for_keyword(content, raw_keyword) or db_snippet
+                )
+                results.append(d)
         return results
 
 
@@ -554,30 +645,55 @@ def insert_search_results(session_id: int, hits: list[dict]) -> None:
     if not hits:
         return
     with get_db() as conn:
-        conn.executemany(
-            """INSERT INTO search_results
-               (session_id, source, file_id, filename, page_num,
-                snippet, dynasty, category, author, sutra_id, title)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [
-                (
-                    session_id,
-                    h.get("source", "local"),
-                    int(h["file_id"]) if h.get("file_id") else None,
-                    h.get("filename", ""),
-                    int(h["page_num"]) if h.get("page_num") else None,
-                    json.dumps(h["snippets"], ensure_ascii=False)
-                    if h.get("snippets")
-                    else h.get("snippet", ""),
-                    h.get("dynasty", ""),
-                    h.get("category", ""),
-                    h.get("author", ""),
-                    h.get("sutra_id"),
-                    h.get("title"),
-                )
-                for h in hits
-            ],
-        )
+        # Session may be deleted while an async search task is still running.
+        session_exists = conn.execute(
+            "SELECT 1 FROM sessions WHERE id=? LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if not session_exists:
+            logger.warning(
+                "Skip insert_search_results: session %s does not exist",
+                session_id,
+            )
+            return
+
+        try:
+            conn.executemany(
+                """INSERT INTO search_results
+                   (session_id, source, file_id, filename, page_num,
+                    snippet, keyword_sentence, is_original_text,
+                    content_label,
+                    dynasty, category, author, sutra_id, title)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (
+                        session_id,
+                        h.get("source", "local"),
+                        int(h["file_id"]) if h.get("file_id") else None,
+                        h.get("filename", ""),
+                        int(h["page_num"]) if h.get("page_num") else None,
+                        json.dumps(h["snippets"], ensure_ascii=False)
+                        if h.get("snippets")
+                        else h.get("snippet", ""),
+                        h.get("keyword_sentence", ""),
+                        1 if h.get("is_original_text", False) else 0,
+                        h.get("content_label", ""),
+                        h.get("dynasty", ""),
+                        h.get("category", ""),
+                        h.get("author", ""),
+                        h.get("sutra_id"),
+                        h.get("title"),
+                    )
+                    for h in hits
+                ],
+            )
+        except sqlite3.IntegrityError:
+            logger.warning(
+                "Skip insert_search_results due FK constraint. session_id=%s, hits=%d",
+                session_id,
+                len(hits),
+                exc_info=True,
+            )
 
 
 def get_search_results_by_session(session_id: int) -> list[dict]:
@@ -594,6 +710,7 @@ def get_search_results_by_session(session_id: int) -> list[dict]:
         results = []
         for r in rows:
             d = dict(r)
+            d["is_original_text"] = bool(d.get("is_original_text"))
             snippet_val = d.get("snippet", "")
             if snippet_val.startswith("["):
                 try:

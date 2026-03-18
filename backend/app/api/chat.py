@@ -156,7 +156,12 @@ async def chat(req: ChatRequest) -> ChatResponse:
                 filename=h.get("filename", ""),
                 page_num=int(h["page_num"]) if h.get("page_num") else None,
                 snippet=h.get("snippet", ""),
+                snippets=h.get("snippets", []),
+                keyword_sentence=h.get("keyword_sentence", ""),
+                is_original_text=bool(h.get("is_original_text", False)),
+                content_label=h.get("content_label", ""),
                 dynasty=h.get("dynasty", ""),
+                category=h.get("category", ""),
                 author=h.get("author", ""),
             )
             for h in hits[:5]

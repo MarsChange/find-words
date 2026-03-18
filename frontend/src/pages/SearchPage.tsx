@@ -10,11 +10,25 @@ import { wsService } from '@/services/websocket';
 const DYNASTY_OPTIONS = ['先秦', '西汉', '东汉', '魏晋南北朝', '隋唐', '宋元明清'] as const;
 const CATEGORY_OPTIONS = ['本土文献', '汉译佛典', '中土佛教文献'] as const;
 
+function expandLocalResults(items: SearchResultItem[]): SearchResultItem[] {
+  return items.flatMap((item) => {
+    if (item.source !== 'local') return [item];
+    const snippets = item.snippets && item.snippets.length > 0 ? item.snippets : [];
+    if (snippets.length <= 1) {
+      return [{ ...item, snippet: snippets[0] ?? item.snippet, snippets: undefined }];
+    }
+    return snippets.map((snippet) => ({
+      ...item,
+      snippet,
+      snippets: undefined,
+    }));
+  });
+}
+
 export default function SearchPage() {
   const navigate = useNavigate();
   const [keyword, setKeyword] = useState('');
   const [useCbeta, setUseCbeta] = useState(false);
-  const [includeAnnotations, setIncludeAnnotations] = useState(false);
   const [results, setResults] = useState<SearchResultItem[]>([]);
   const [total, setTotal] = useState(0);
   const [isSearching, setIsSearching] = useState(false);
@@ -44,8 +58,10 @@ export default function SearchPage() {
     const unsubComplete = wsService.on('search_complete', (data) => {
       setIsSynthesizing(false);
       setIsSearching(false);
-      setResults((data.hits as SearchResultItem[]) || []);
-      setTotal((data.hits as SearchResultItem[])?.length || 0);
+      const rawHits = (data.hits as SearchResultItem[]) || [];
+      const normalizedHits = expandLocalResults(rawHits);
+      setResults(normalizedHits);
+      setTotal(normalizedHits.length);
       setTraditionalKeyword((data.traditional_query as string) || '');
       setSynthesis((data.synthesis as string) || '');
     });
@@ -82,7 +98,6 @@ export default function SearchPage() {
         type: 'search_stream',
         query: q,
         use_cbeta: useCbeta,
-        include_annotations: includeAnnotations,
         session_id: session.id,
       });
     } catch {
@@ -90,7 +105,7 @@ export default function SearchPage() {
       setTotal(0);
       setIsSearching(false);
     }
-  }, [keyword, useCbeta, includeAnnotations]);
+  }, [keyword, useCbeta]);
 
   const handleViewInReader = (fileId: number, page: number) => {
     navigate(`/reader/${fileId}?page=${page}&keyword=${encodeURIComponent(keyword)}`);
@@ -136,11 +151,12 @@ export default function SearchPage() {
         getSession(newSessionId),
         getSessionResults(newSessionId),
       ]);
+      const normalizedResults = expandLocalResults(savedResults);
       setKeyword(sessionData.session.keyword);
       setTraditionalKeyword(sessionData.session.traditional_keyword || '');
       setSynthesis(sessionData.session.synthesis || '');
-      setResults(savedResults);
-      setTotal(savedResults.length);
+      setResults(normalizedResults);
+      setTotal(normalizedResults.length);
       setHasSearched(true);
     } catch {
       // If loading fails, just switch session without restoring
@@ -179,15 +195,6 @@ export default function SearchPage() {
                 className="h-4 w-4 rounded border-parchment-300 text-cinnabar-500 focus:ring-cinnabar-400"
               />
               同时检索 CBETA 线上佛典
-            </label>
-            <label className="flex cursor-pointer items-center gap-2 text-sm text-ink-700">
-              <input
-                type="checkbox"
-                checked={includeAnnotations}
-                onChange={(e) => setIncludeAnnotations(e.target.checked)}
-                className="h-4 w-4 rounded border-parchment-300 text-cinnabar-500 focus:ring-cinnabar-400"
-              />
-              一并检索注文
             </label>
             <div className="flex items-center gap-1.5 text-sm text-ink-700">
               <span className="text-parchment-400">朝代筛选:</span>

@@ -28,10 +28,12 @@ export interface SearchResultItem {
   page_num: number | null;
   snippet: string;
   snippets?: string[];
+  keyword_sentence?: string;
+  is_original_text?: boolean;
+  content_label?: string;
   dynasty: string;
   category: string;
   author: string;
-  content_type?: string;
 }
 
 export interface SearchResponse {

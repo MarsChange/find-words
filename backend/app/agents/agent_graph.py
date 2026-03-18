@@ -1,12 +1,15 @@
 """LangGraph multi-agent workflow for classical text search and analysis."""
 
+import json
 import logging
 import operator
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Annotated, TypedDict
 
 from app.core.database import search_content, get_messages_by_session, get_setting
 
 logger = logging.getLogger(__name__)
+_JUDGE_MAX_WORKERS = 8
 
 
 # ── Lazy-loaded heavy dependencies ──────────────────────────────────────────
@@ -44,7 +47,6 @@ class AgentState(_AgentStateRequired, total=False):
     """Shared state flowing through the agent graph."""
     traditional_query: str
     use_cbeta: bool
-    include_annotations: bool
     local_hits: Annotated[list[dict], operator.add]
     cbeta_hits: Annotated[list[dict], operator.add]
     all_hits: Annotated[list[dict], operator.add]
@@ -68,22 +70,28 @@ def local_searcher(state: AgentState) -> dict:
     query = state.get("traditional_query", state["original_query"])
     # Also search the original (simplified) form
     original = state["original_query"]
-    include_annotations = state.get("include_annotations", False)
 
-    hits = search_content(query, include_annotations=include_annotations)
+    hits = search_content(query)
     if original != query:
-        hits.extend(search_content(original, include_annotations=include_annotations))
+        hits.extend(search_content(original))
 
-    # Deduplicate by (file_id, page_num, content_type)
+    # Deduplicate by occurrence granularity
     seen = set()
     unique: list[dict] = []
     for h in hits:
-        key = (h.get("file_id"), h.get("page_num"), h.get("content_type", "body"))
+        key = (
+            h.get("file_id"),
+            h.get("page_num"),
+            h.get("snippet", ""),
+            h.get("keyword_sentence", ""),
+        )
         if key not in seen:
             seen.add(key)
             unique.append(h)
 
-    return {"local_hits": unique}
+    # Post-classify local hits via web search, tagging entries that are likely
+    # original classical text body ("正文").
+    return {"local_hits": _annotate_local_hits_with_web_search(unique, query)}
 
 
 def cbeta_scraper_node(state: AgentState) -> dict:
@@ -99,7 +107,7 @@ def cbeta_scraper_node(state: AgentState) -> dict:
         val = get_setting("cbeta_max_results")
         max_results = int(val) if val else 20
         results = search_cbeta(query, max_results=max_results)
-        hits = [
+        raw_hits = [
             {
                 "source": "cbeta",
                 "filename": r.title,
@@ -112,6 +120,7 @@ def cbeta_scraper_node(state: AgentState) -> dict:
             }
             for r in results
         ]
+        hits = _merge_cbeta_hits(raw_hits)
     except Exception:
         logger.exception("CBETA scraper failed")
         hits = []
@@ -137,7 +146,7 @@ def synthesizer(state: AgentState) -> dict:
     if cfg.settings.llm_provider_api_key and all_hits:
         try:
             client = _get_client()
-            excerpts = "\n".join(_format_excerpt(h) for h in all_hits[:20])
+            excerpts = "\n".join(_format_excerpt(h) for h in _hits_for_llm_context(all_hits)[:20])
             messages: list = [
                 {"role": "system", "content": (
                     "你是一位汉语言古籍研究助手。目前用户检索相应的词语文语料，得到了以下检索结果，"
@@ -188,7 +197,7 @@ def synthesizer_streaming(state: AgentState, on_chunk=None):
     if cfg.settings.llm_provider_api_key and all_hits:
         try:
             client = _get_client()
-            excerpts = "\n".join(_format_excerpt(h) for h in all_hits[:20])
+            excerpts = "\n".join(_format_excerpt(h) for h in _hits_for_llm_context(all_hits)[:20])
             messages: list = [
                 {"role": "system", "content": (
                     "你是一位汉语言古籍研究助手。目前用户检索相应的词语文语料，得到了以下检索结果，"
@@ -237,7 +246,7 @@ def chat_agent(state: AgentState) -> dict:
         h.setdefault("source", "local")
 
     all_hits = local + cbeta
-    excerpts = "\n".join(_format_excerpt(h) for h in all_hits[:20])
+    excerpts = "\n".join(_format_excerpt(h) for h in _hits_for_llm_context(all_hits)[:20])
     try:
         client = _get_client()
         messages: list = [
@@ -272,12 +281,167 @@ def _format_excerpt(h: dict) -> str:
     """Format a single hit as a labelled excerpt line for LLM context."""
     source = h.get("source", "local")
     if source == "local":
-        content_type = h.get("content_type", "body")
-        label = "正文" if content_type == "body" else "注文"
-        tag = f"[local/{label}]"
+        label = "正文" if h.get("is_original_text", False) else "未核正文"
+        dynasty = h.get("dynasty", "") or "朝代未详"
+        category = h.get("category", "") or "来源未详"
+        tag = f"[local/{label}/{dynasty}/{category}]"
     else:
         tag = f"[{source}]"
     return f"- {tag} {h.get('filename', '')}: {h.get('snippet', '')}"
+
+
+def _hits_for_llm_context(hits: list[dict]) -> list[dict]:
+    """Filter hits for LLM prompt: local only keeps web-verified 正文."""
+    return [
+        h for h in hits
+        if h.get("source") != "local" or h.get("is_original_text", False)
+    ]
+
+
+def _merge_cbeta_hits(hits: list[dict]) -> list[dict]:
+    """Merge CBETA hits by catalog key; keep snippets aggregated."""
+    merged: dict[tuple[str, str, str, str], dict] = {}
+
+    for h in hits:
+        key = (
+            str(h.get("sutra_id", "")),
+            str(h.get("title", "") or h.get("filename", "")),
+            str(h.get("dynasty", "")),
+            str(h.get("author", "")),
+        )
+        if key not in merged:
+            item = dict(h)
+            snippets = list(item.get("snippets", [])) or (
+                [item.get("snippet", "")] if item.get("snippet", "") else []
+            )
+            item["snippets"] = snippets
+            item["snippet"] = snippets[0] if snippets else item.get("snippet", "")
+            merged[key] = item
+            continue
+
+        target = merged[key]
+        existing = list(target.get("snippets", []))
+        incoming = list(h.get("snippets", [])) or (
+            [h.get("snippet", "")] if h.get("snippet", "") else []
+        )
+        for s in incoming:
+            if s and s not in existing:
+                existing.append(s)
+        target["snippets"] = existing
+        if existing:
+            target["snippet"] = existing[0]
+
+    return list(merged.values())
+
+
+def _extract_json_object(text: str) -> dict:
+    """Best-effort extraction of a JSON object from model output."""
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        cleaned = "\n".join(lines).strip()
+    try:
+        data = json.loads(cleaned)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _web_search_model() -> str:
+    """Choose a Qwen model for web-search-based sentence judgement."""
+    configured = get_setting("ocr_model") or "qwen3.5-plus"
+    if configured.lower().startswith("qwen"):
+        return configured
+    return "qwen3.5-plus"
+
+
+def _judge_sentence_is_original_text(sentence: str, query: str) -> tuple[bool, str]:
+    """Use Qwen web search to judge whether a sentence is original text."""
+    client = _get_client()
+    model = _web_search_model()
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是古籍正文判定助手。你必须联网检索，并重点使用“句子+原文”进行搜索。"
+                "仅返回 JSON："
+                "{\"is_original_text\":true/false,\"reason\":\"简短理由\"}"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"检索词：{query}\n"
+                f"待判定句子：{sentence}\n"
+                f"请至少执行一次检索：{sentence} 原文\n"
+                "请通过联网搜索判断这句是否属于古籍原始正文，而不是注文、注释或后人案语。"
+            ),
+        },
+    ]
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        response_format={"type": "json_object"},
+        extra_body={"enable_search": True, "enable_thinking": False},
+    )
+    data = _extract_json_object(resp.choices[0].message.content or "")
+    raw_flag = data.get("is_original_text", False)
+    if isinstance(raw_flag, bool):
+        is_original = raw_flag
+    else:
+        is_original = str(raw_flag).strip().lower() in {"true", "1", "yes", "是"}
+    reason = str(data.get("reason", "")).strip()
+    return is_original, reason
+
+
+def _annotate_local_hits_with_web_search(hits: list[dict], query: str) -> list[dict]:
+    """Classify local hits as 正文/非正文 with parallel web-search judgement."""
+    if not hits:
+        return []
+
+    sentence_cache: dict[str, tuple[bool, str]] = {}
+    unique_sentences: list[str] = []
+    for h in hits:
+        sentence = str(h.get("keyword_sentence") or h.get("snippet") or "").strip()
+        if not sentence:
+            h["is_original_text"] = False
+            h["content_label"] = "未核正文"
+            continue
+        if sentence not in sentence_cache:
+            sentence_cache[sentence] = (False, "")
+            unique_sentences.append(sentence)
+
+    if unique_sentences:
+        num_workers = min(_JUDGE_MAX_WORKERS, len(unique_sentences))
+        logger.info(
+            "Parallel正文判定: %d sentences, %d threads",
+            len(unique_sentences),
+            num_workers,
+        )
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            future_to_sentence = {
+                pool.submit(_judge_sentence_is_original_text, sentence, query): sentence
+                for sentence in unique_sentences
+            }
+            for future in as_completed(future_to_sentence):
+                sentence = future_to_sentence[future]
+                try:
+                    sentence_cache[sentence] = future.result()
+                except Exception:
+                    logger.exception("Web-search sentence judgement failed")
+                    sentence_cache[sentence] = (False, "")
+
+    for h in hits:
+        sentence = str(h.get("keyword_sentence") or h.get("snippet") or "").strip()
+        if not sentence:
+            continue
+        is_original, reason = sentence_cache.get(sentence, (False, ""))
+        h["is_original_text"] = is_original
+        h["content_label"] = "正文" if is_original else "未核正文"
+        h["judgement_reason"] = reason
+
+    return hits
 
 
 def _get_client():
@@ -364,14 +528,12 @@ def _get_chat_graph():
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
-def run_search(query: str, use_cbeta: bool = False,
-               include_annotations: bool = False) -> dict:
+def run_search(query: str, use_cbeta: bool = False) -> dict:
     """Execute the full search pipeline and return results."""
     state: AgentState = {
         "original_query": query,
         "traditional_query": "",
         "use_cbeta": use_cbeta,
-        "include_annotations": include_annotations,
         "local_hits": [],
         "cbeta_hits": [],
         "all_hits": [],
@@ -406,14 +568,12 @@ def run_chat(message: str, history: list[dict],
 
 
 def run_search_streaming(query: str, use_cbeta: bool = False,
-                         include_annotations: bool = False,
                          on_chunk=None) -> dict:
     """Execute the search pipeline with streaming synthesis.
 
     Args:
         query: Search query
         use_cbeta: Whether to search CBETA
-        include_annotations: Whether to include annotation content in results
         on_chunk: Optional callback(chunk_text: str) for streaming synthesis
 
     Returns:
@@ -424,7 +584,6 @@ def run_search_streaming(query: str, use_cbeta: bool = False,
         "original_query": query,
         "traditional_query": "",
         "use_cbeta": use_cbeta,
-        "include_annotations": include_annotations,
         "local_hits": [],
         "cbeta_hits": [],
         "all_hits": [],
@@ -485,7 +644,7 @@ def run_chat_streaming(message: str, history: list[dict],
         h.setdefault("source", "local")
     all_hits = local + cbeta
     
-    excerpts = "\n".join(_format_excerpt(h) for h in all_hits[:20])
+    excerpts = "\n".join(_format_excerpt(h) for h in _hits_for_llm_context(all_hits)[:20])
 
     # Build system prompt with synthesis context if available
     system_content = (

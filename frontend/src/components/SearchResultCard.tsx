@@ -33,7 +33,9 @@ export function highlightKeyword(text: string, keyword: string, traditionalKeywo
 }
 
 export default function SearchResultCard({ result, keyword, traditionalKeyword, onViewInReader }: SearchResultCardProps) {
-  const snippets = result.snippets && result.snippets.length > 0 ? result.snippets : [result.snippet];
+  const snippets = result.source === 'local'
+    ? [result.snippet]
+    : (result.snippets && result.snippets.length > 0 ? result.snippets : [result.snippet]);
 
   return (
     <div className="group rounded-lg border border-parchment-200 bg-white p-4 shadow-sm transition-shadow hover:shadow-md">
@@ -51,11 +53,11 @@ export default function SearchResultCard({ result, keyword, traditionalKeyword, 
         {result.source === 'local' && (
           <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-xs text-emerald-600">本地</span>
         )}
-        {result.source === 'local' && result.content_type === 'body' && (
-          <span className="rounded bg-sky-500/10 px-1.5 py-0.5 text-xs text-sky-600">正文</span>
+        {result.source === 'local' && result.is_original_text && (
+          <span className="rounded bg-sky-500/10 px-1.5 py-0.5 text-xs text-sky-600">正文（联网判定）</span>
         )}
-        {result.source === 'local' && result.content_type === 'annotation' && (
-          <span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-xs text-violet-600">注文</span>
+        {result.source === 'local' && !result.is_original_text && (
+          <span className="rounded bg-slate-500/10 px-1.5 py-0.5 text-xs text-slate-600">注文</span>
         )}
         {result.source === 'cbeta' && (
           <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-xs text-amber-700">CBETA</span>

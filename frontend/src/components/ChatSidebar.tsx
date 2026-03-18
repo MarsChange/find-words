@@ -22,6 +22,21 @@ interface ChatSidebarProps {
   onSessionChange?: (sessionId: number | undefined) => void;
 }
 
+function expandLocalResults(items: SearchResultItem[]): SearchResultItem[] {
+  return items.flatMap((item) => {
+    if (item.source !== 'local') return [item];
+    const snippets = item.snippets && item.snippets.length > 0 ? item.snippets : [];
+    if (snippets.length <= 1) {
+      return [{ ...item, snippet: snippets[0] ?? item.snippet, snippets: undefined }];
+    }
+    return snippets.map((snippet) => ({
+      ...item,
+      snippet,
+      snippets: undefined,
+    }));
+  });
+}
+
 /* ── Collapsible search results panel ── */
 
 function SessionResultsPanel({ sessionId, keyword, traditionalKeyword }: { sessionId: number; keyword?: string; traditionalKeyword?: string }) {
@@ -41,7 +56,7 @@ function SessionResultsPanel({ sessionId, keyword, traditionalKeyword }: { sessi
       setIsLoading(true);
       try {
         const data = await getSessionResults(sessionId);
-        setResults(data);
+        setResults(expandLocalResults(data));
       } catch {
         setResults([]);
       } finally {
@@ -129,6 +144,12 @@ function ResultItem({ result, keyword, traditionalKeyword }: { result: SearchRes
         )}
         {result.source === 'local' && (
           <span className="rounded bg-emerald-500/10 px-1 py-0.5 text-emerald-600">本地</span>
+        )}
+        {result.source === 'local' && !result.is_original_text && (
+          <span className="rounded bg-slate-500/10 px-1 py-0.5 text-slate-600">注文</span>
+        )}
+        {result.source === 'local' && result.is_original_text && (
+          <span className="rounded bg-sky-500/10 px-1 py-0.5 text-sky-600">正文</span>
         )}
         {isCbeta && (
           <span className="rounded bg-amber-500/10 px-1 py-0.5 text-amber-700">CBETA</span>

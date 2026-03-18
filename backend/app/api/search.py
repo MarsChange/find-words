@@ -21,8 +21,7 @@ async def search(req: SearchRequest) -> SearchResponse:
     The query is automatically converted from simplified to traditional Chinese.
     """
     try:
-        result = run_search(query=req.query, use_cbeta=req.use_cbeta,
-                            include_annotations=req.include_annotations)
+        result = run_search(query=req.query, use_cbeta=req.use_cbeta)
     except Exception:
         logger.exception("Search failed for query: %s", req.query)
         raise HTTPException(status_code=500, detail="搜索处理失败")
@@ -35,9 +34,11 @@ async def search(req: SearchRequest) -> SearchResponse:
             file_id=int(h["file_id"]) if h.get("file_id") else None,
             filename=h.get("filename", ""),
             page_num=int(h["page_num"]) if h.get("page_num") else None,
-            content_type=h.get("content_type", "body"),
             snippet=h.get("snippet", ""),
             snippets=h.get("snippets", []),
+            keyword_sentence=h.get("keyword_sentence", ""),
+            is_original_text=bool(h.get("is_original_text", False)),
+            content_label=h.get("content_label", ""),
             dynasty=h.get("dynasty", ""),
             category=h.get("category", ""),
             author=h.get("author", ""),

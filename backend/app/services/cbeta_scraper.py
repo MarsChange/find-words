@@ -339,6 +339,11 @@ def _parse_dynasty_author(info_text: str) -> tuple[str, str]:
     return dynasty, author
 
 
+def _compact_text(text: str) -> str:
+    """Remove all whitespace for robust substring matching."""
+    return re.sub(r"\s+", "", text or "")
+
+
 # ── Main search function ──────────────────────────────────────────────────
 
 
@@ -366,6 +371,7 @@ def search_cbeta(query: str, max_results: int = 20) -> list[CBETAResult]:
         sanitized = _QUERY_SANITIZE_RE.sub("", query).strip()
         if not sanitized:
             return results
+        compact_query = _compact_text(sanitized)
         url = f"{_CBETA_SEARCH_URL}?q={quote(sanitized)}&lang=zh"
         driver.get(url)
 
@@ -410,6 +416,19 @@ def search_cbeta(query: str, max_results: int = 20) -> list[CBETAResult]:
                     By.CSS_SELECTOR, "div.pr-5.listtxt"
                 )
                 snippets = [el.text.strip() for el in snippet_els if el.text.strip()]
+
+                # Ensure this item actually matches the current query.
+                marks = [
+                    _compact_text(el.text.strip())
+                    for el in item.find_elements(By.CSS_SELECTOR, "mark")
+                    if el.text.strip()
+                ]
+                haystack = _compact_text("".join([title] + snippets))
+                if compact_query:
+                    if marks and not any(compact_query in m or m in compact_query for m in marks):
+                        continue
+                    if not marks and compact_query not in haystack:
+                        continue
 
                 if title or snippets:
                     results.append(CBETAResult(
