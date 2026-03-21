@@ -168,9 +168,13 @@ class AppSettingsResponse(BaseModel):
     cbeta_max_results: int = 20
     enable_thinking: bool = False
     ocr_model: str = "qwen3.5-plus"
+    include_commentary_in_synthesis_prompt: bool = False
+    synthesis_user_prompt: str = "请从汉语词汇史的角度，结合汉译佛典和本土文献语料，梳理并分析用户所检索词语的中土化路径。"
 
 
 class AppSettingsUpdateRequest(BaseModel):
     cbeta_max_results: Optional[int] = Field(None, ge=5, le=100)
     enable_thinking: Optional[bool] = None
     ocr_model: Optional[str] = None
+    include_commentary_in_synthesis_prompt: Optional[bool] = None
+    synthesis_user_prompt: Optional[str] = Field(None, max_length=3000)

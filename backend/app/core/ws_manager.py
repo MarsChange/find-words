@@ -78,7 +78,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
 
 async def _handle_search_stream(websocket: WebSocket, data: dict) -> None:
     """Handle streaming search request."""
-    from app.agents.agent_graph import run_search_streaming
+    from app.agents.agent_graph import run_search
     from app.core.database import insert_search_results, update_session_traditional_keyword, update_session_synthesis
     
     query = data.get("query", "")
@@ -103,7 +103,7 @@ async def _handle_search_stream(websocket: WebSocket, data: dict) -> None:
         
         # Run search with streaming
         result = await asyncio.to_thread(
-            run_search_streaming,
+            run_search,
             query=query,
             use_cbeta=use_cbeta,
             on_chunk=lambda chunk: asyncio.run_coroutine_threadsafe(on_chunk(chunk), _main_loop) if _main_loop else None

@@ -19,6 +19,7 @@ backend/.packenv/
 backend/venv/
 backend/dist/
 backend/build/
+backend/scripts/
 backend/*.spec.bak
 
 # === 前端 (Node / Vite / Electron) ===

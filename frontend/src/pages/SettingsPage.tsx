@@ -42,6 +42,18 @@ export default function SettingsPage() {
   const [thinkingSaved, setThinkingSaved] = useState(false);
   const [thinkingError, setThinkingError] = useState('');
 
+  // Synthesis prompt settings
+  const [includeCommentaryInSynthesisPrompt, setIncludeCommentaryInSynthesisPrompt] = useState(false);
+  const [commentarySaving, setCommentarySaving] = useState(false);
+  const [commentarySaved, setCommentarySaved] = useState(false);
+  const [commentaryError, setCommentaryError] = useState('');
+  const [synthesisUserPrompt, setSynthesisUserPrompt] = useState(
+    '请从汉语词汇史的角度，结合汉译佛典和本土文献语料，梳理并分析用户所检索词语的中土化路径。',
+  );
+  const [promptSaving, setPromptSaving] = useState(false);
+  const [promptSaved, setPromptSaved] = useState(false);
+  const [promptError, setPromptError] = useState('');
+
   // OCR model settings
   const [ocrModel, setOcrModel] = useState('qwen3.5-plus');
   const [ocrModelSaving, setOcrModelSaving] = useState(false);
@@ -61,6 +73,8 @@ export default function SettingsPage() {
       .then((data) => {
         setCbetaMaxResults(data.cbeta_max_results);
         setEnableThinking(data.enable_thinking);
+        setIncludeCommentaryInSynthesisPrompt(data.include_commentary_in_synthesis_prompt);
+        setSynthesisUserPrompt(data.synthesis_user_prompt);
         setOcrModel(data.ocr_model);
       })
       .catch(() => {
@@ -158,6 +172,42 @@ export default function SettingsPage() {
       setOcrModelError('保存失败，请重试。');
     } finally {
       setOcrModelSaving(false);
+    }
+  };
+
+  const handleIncludeCommentaryToggle = async (enabled: boolean) => {
+    setIncludeCommentaryInSynthesisPrompt(enabled);
+    setCommentarySaved(false);
+    setCommentaryError('');
+    setCommentarySaving(true);
+    try {
+      const result = await updateAppSettings({ include_commentary_in_synthesis_prompt: enabled });
+      setIncludeCommentaryInSynthesisPrompt(result.include_commentary_in_synthesis_prompt);
+      setCommentarySaved(true);
+      setTimeout(() => setCommentarySaved(false), 3000);
+    } catch {
+      setIncludeCommentaryInSynthesisPrompt(!enabled);
+      setCommentaryError('保存失败，请重试。');
+    } finally {
+      setCommentarySaving(false);
+    }
+  };
+
+  const handleSynthesisUserPromptSave = async () => {
+    setPromptSaved(false);
+    setPromptError('');
+    setPromptSaving(true);
+    try {
+      const result = await updateAppSettings({
+        synthesis_user_prompt: synthesisUserPrompt,
+      });
+      setSynthesisUserPrompt(result.synthesis_user_prompt);
+      setPromptSaved(true);
+      setTimeout(() => setPromptSaved(false), 3000);
+    } catch {
+      setPromptError('保存失败，请重试。');
+    } finally {
+      setPromptSaving(false);
     }
   };
 
@@ -335,6 +385,63 @@ export default function SettingsPage() {
             {thinkingSaving && <span className="text-xs text-parchment-400">保存中...</span>}
             {thinkingSaved && <span className="text-xs text-green-600">已保存</span>}
             {thinkingError && <span className="text-xs text-red-500">{thinkingError}</span>}
+          </div>
+        </div>
+      </div>
+
+      {/* AI Prompt Context */}
+      <div className="mt-6 rounded-lg border border-parchment-200 bg-white p-6 shadow-sm">
+        <h2 className="mb-4 font-serif text-lg font-medium text-ink-800">AI 分析与对话提示词</h2>
+
+        <div>
+          <p className="mb-3 text-xs text-parchment-400">
+            将注文检索结果加入到 AI 词源分析与对话回答的提示词中。
+          </p>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={includeCommentaryInSynthesisPrompt}
+              onClick={() => handleIncludeCommentaryToggle(!includeCommentaryInSynthesisPrompt)}
+              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-cinnabar-400/20 ${
+                includeCommentaryInSynthesisPrompt ? 'bg-cinnabar-500' : 'bg-parchment-300'
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow ring-0 transition-transform ${
+                  includeCommentaryInSynthesisPrompt ? 'translate-x-5' : 'translate-x-0'
+                }`}
+              />
+            </button>
+            <span className="text-sm text-ink-700">{includeCommentaryInSynthesisPrompt ? '已开启' : '已关闭'}</span>
+            {commentarySaving && <span className="text-xs text-parchment-400">保存中...</span>}
+            {commentarySaved && <span className="text-xs text-green-600">已保存</span>}
+            {commentaryError && <span className="text-xs text-red-500">{commentaryError}</span>}
+          </div>
+
+          <div className="mt-4">
+            <label className="mb-1 block text-sm text-ink-700">AI 词源分析提示词（User）</label>
+            <p className="mb-2 text-xs text-parchment-400">
+              该内容将作为词源分析阶段传给大模型的 user 提示词。
+            </p>
+            <textarea
+              value={synthesisUserPrompt}
+              onChange={(e) => setSynthesisUserPrompt(e.target.value)}
+              rows={4}
+              className="w-full rounded-md border border-parchment-200 bg-parchment-50 px-3 py-2 text-sm text-ink-800 placeholder:text-parchment-400 focus:border-cinnabar-400 focus:outline-none focus:ring-1 focus:ring-cinnabar-400"
+            />
+            <div className="mt-2 flex items-center gap-3">
+              <button
+                type="button"
+                onClick={handleSynthesisUserPromptSave}
+                disabled={promptSaving}
+                className="rounded-md bg-cinnabar-500 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-cinnabar-600 disabled:opacity-50"
+              >
+                {promptSaving ? '保存中...' : '保存提示词'}
+              </button>
+              {promptSaved && <span className="text-xs text-green-600">已保存</span>}
+              {promptError && <span className="text-xs text-red-500">{promptError}</span>}
+            </div>
           </div>
         </div>
       </div>

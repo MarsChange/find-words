@@ -13,6 +13,9 @@ const api = axios.create({
   },
 });
 
+const DEFAULT_SYNTHESIS_USER_PROMPT =
+  '请从汉语词汇史的角度，结合汉译佛典和本土文献语料，梳理并分析用户所检索词语的中土化路径。';
+
 /* ── Search ── */
 
 export interface SearchParams {
@@ -208,6 +211,8 @@ export interface AppSettings {
   cbeta_max_results: number;
   enable_thinking: boolean;
   ocr_model: string;
+  include_commentary_in_synthesis_prompt: boolean;
+  synthesis_user_prompt: string;
 }
 
 export function getAppSettings(): Promise<AppSettings> {
@@ -215,6 +220,8 @@ export function getAppSettings(): Promise<AppSettings> {
     cbeta_max_results: r.data.cbeta_max_results ?? 20,
     enable_thinking: r.data.enable_thinking ?? false,
     ocr_model: r.data.ocr_model ?? 'qwen3.5-plus',
+    include_commentary_in_synthesis_prompt: r.data.include_commentary_in_synthesis_prompt ?? false,
+    synthesis_user_prompt: r.data.synthesis_user_prompt ?? DEFAULT_SYNTHESIS_USER_PROMPT,
   }));
 }
 
@@ -225,6 +232,8 @@ export function updateAppSettings(settings: Partial<AppSettings>): Promise<AppSe
       cbeta_max_results: r.data.cbeta_max_results ?? 20,
       enable_thinking: r.data.enable_thinking ?? false,
       ocr_model: r.data.ocr_model ?? 'qwen3.5-plus',
+      include_commentary_in_synthesis_prompt: r.data.include_commentary_in_synthesis_prompt ?? false,
+      synthesis_user_prompt: r.data.synthesis_user_prompt ?? DEFAULT_SYNTHESIS_USER_PROMPT,
     }));
 }
 

@@ -41,7 +41,7 @@ mac:
 
 win:
   icon: electron/icons/icon.ico
-  signAndEditExecutable: false
+  signAndEditExecutable: true
   target:
     - nsis
     - portable
@@ -49,6 +49,9 @@ win:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
+  installerIcon: electron/icons/icon.ico
+  uninstallerIcon: electron/icons/icon.ico
+  installerHeaderIcon: electron/icons/icon.ico
   installerLanguages:
     - zh_CN
     - en_US

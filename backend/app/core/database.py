@@ -143,6 +143,8 @@ def init_db() -> None:
             INSERT OR IGNORE INTO settings (key, value) VALUES ('cbeta_max_results', '20');
             INSERT OR IGNORE INTO settings (key, value) VALUES ('enable_thinking', 'false');
             INSERT OR IGNORE INTO settings (key, value) VALUES ('ocr_model', 'qwen3.5-plus');
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('include_commentary_in_synthesis_prompt', 'false');
+            INSERT OR IGNORE INTO settings (key, value) VALUES ('synthesis_user_prompt', '请从汉语词汇史的角度，结合汉译佛典和本土文献语料，梳理并分析用户所检索词语的中土化路径。');
             """
         )
 

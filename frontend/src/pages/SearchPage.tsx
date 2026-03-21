@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import SearchResultCard from '@/components/SearchResultCard';
@@ -27,6 +27,7 @@ function expandLocalResults(items: SearchResultItem[]): SearchResultItem[] {
 
 export default function SearchPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [keyword, setKeyword] = useState('');
   const [useCbeta, setUseCbeta] = useState(false);
   const [results, setResults] = useState<SearchResultItem[]>([]);
@@ -92,6 +93,7 @@ export default function SearchPage() {
       // Create a new chat session for this search
       const session = await createSession(q);
       setSessionId(session.id);
+      navigate(`/?session_id=${session.id}`, { replace: true });
 
       // Send search request via WebSocket
       wsService.send({
@@ -108,7 +110,14 @@ export default function SearchPage() {
   }, [keyword, useCbeta]);
 
   const handleViewInReader = (fileId: number, page: number) => {
-    navigate(`/reader/${fileId}?page=${page}&keyword=${encodeURIComponent(keyword)}`);
+    const params = new URLSearchParams({
+      page: String(page),
+      keyword,
+    });
+    if (sessionId) {
+      params.set('session_id', String(sessionId));
+    }
+    navigate(`/reader/${fileId}?${params.toString()}`);
   };
 
   const toggleDynasty = (dynasty: string) => {
@@ -135,21 +144,12 @@ export default function SearchPage() {
     return true;
   });
 
-  const handleSessionChange = async (newSessionId: number | undefined) => {
-    setSessionId(newSessionId);
-    if (!newSessionId) {
-      setKeyword('');
-      setTraditionalKeyword('');
-      setResults([]);
-      setTotal(0);
-      setHasSearched(false);
-      return;
-    }
-    // Restore keyword and results from the historical session
+  const restoreSessionById = useCallback(async (sid: number) => {
+    setSessionId(sid);
     try {
       const [sessionData, savedResults] = await Promise.all([
-        getSession(newSessionId),
-        getSessionResults(newSessionId),
+        getSession(sid),
+        getSessionResults(sid),
       ]);
       const normalizedResults = expandLocalResults(savedResults);
       setKeyword(sessionData.session.keyword);
@@ -159,9 +159,33 @@ export default function SearchPage() {
       setTotal(normalizedResults.length);
       setHasSearched(true);
     } catch {
-      // If loading fails, just switch session without restoring
+      // If loading fails, just keep current state
     }
+  }, []);
+
+  const handleSessionChange = async (newSessionId: number | undefined) => {
+    setSessionId(newSessionId);
+    if (!newSessionId) {
+      navigate('/', { replace: true });
+      setKeyword('');
+      setTraditionalKeyword('');
+      setResults([]);
+      setTotal(0);
+      setHasSearched(false);
+      return;
+    }
+    navigate(`/?session_id=${newSessionId}`, { replace: true });
+    await restoreSessionById(newSessionId);
   };
+
+  useEffect(() => {
+    const sidRaw = searchParams.get('session_id');
+    if (!sidRaw) return;
+    const sid = Number(sidRaw);
+    if (!Number.isInteger(sid) || sid <= 0) return;
+    if (sid === sessionId && hasSearched) return;
+    restoreSessionById(sid);
+  }, [searchParams, sessionId, hasSearched, restoreSessionById]);
 
   return (
     <div className="flex h-[calc(100vh-3.5rem)]">
